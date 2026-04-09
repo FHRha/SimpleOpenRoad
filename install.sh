@@ -6,12 +6,13 @@ usage() {
 SimpleOpenRoad installer
 
 Usage:
-  install.sh [--repo <owner/repo>] [--version <tag>] [--arch <x86_64|arm64>] [--install-dir <path>] [--bin-dir <path>]
+  install.sh [--repo <owner/repo>] [--version <tag>] [--arch <x86_64|arm64>] [--python <binary>] [--install-dir <path>] [--bin-dir <path>]
 
 Options:
   --repo        GitHub repository in owner/repo format (default: FHRha/SimpleOpenRoad)
   --version     Release tag (default: latest release tag)
   --arch        Target archive architecture (default: auto-detect from uname -m)
+  --python      Preferred Python binary (must be >= 3.11)
   --install-dir Target install directory (default: ~/.local/share/simple-open-road)
   --bin-dir     Directory for wrapper binary (default: ~/.local/bin)
   -h, --help    Show this help
@@ -24,6 +25,60 @@ EOF
 
 BACKGROUND_MODE=""
 STATUS_HINT=""
+PYTHON_BIN=""
+
+python_is_supported() {
+  local bin="$1"
+  if ! command -v "${bin}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  "${bin}" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
+try_install_python311_with_apt() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    return 1
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    return 1
+  fi
+
+  echo "Installing Python 3.11 runtime via apt..."
+  apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3.11 python3.11-venv
+}
+
+resolve_python_bin() {
+  local candidate=""
+
+  if [[ -n "${PYTHON_BIN}" ]]; then
+    if python_is_supported "${PYTHON_BIN}"; then
+      return 0
+    fi
+    echo "Provided --python '${PYTHON_BIN}' is not available or is < 3.11." >&2
+    return 1
+  fi
+
+  for candidate in python3.13 python3.12 python3.11 python3; do
+    if python_is_supported "${candidate}"; then
+      PYTHON_BIN="${candidate}"
+      return 0
+    fi
+  done
+
+  if try_install_python311_with_apt && python_is_supported "python3.11"; then
+    PYTHON_BIN="python3.11"
+    return 0
+  fi
+
+  echo "Python >= 3.11 was not found." >&2
+  echo "Install python3.11 and python3.11-venv, or run installer with --python <binary>." >&2
+  return 1
+}
 
 detect_arch() {
   local machine
@@ -151,6 +206,10 @@ while [[ $# -gt 0 ]]; do
       ARCH="$2"
       shift 2
       ;;
+    --python)
+      PYTHON_BIN="$2"
+      shift 2
+      ;;
     --install-dir)
       INSTALL_DIR="$2"
       shift 2
@@ -176,6 +235,8 @@ if [[ -n "${ARCH}" ]]; then
 else
   ARCH="$(detect_arch)"
 fi
+
+resolve_python_bin
 
 if [[ -z "${TAG}" ]]; then
   TAG="$(resolve_release_tag || true)"
@@ -218,7 +279,7 @@ if [[ ! -f "${INSTALL_DIR}/config/config.yaml" ]]; then
 fi
 
 echo "Creating virtual environment"
-python3 -m venv "${INSTALL_DIR}/.venv"
+"${PYTHON_BIN}" -m venv "${INSTALL_DIR}/.venv"
 
 echo "Installing SimpleOpenRoad"
 "${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
@@ -236,5 +297,6 @@ echo "Installation complete"
 echo "Binary: ${BIN_DIR}/sor"
 echo "Config: ${INSTALL_DIR}/config/config.yaml"
 echo "Architecture: ${ARCH}"
+echo "Python binary: ${PYTHON_BIN}"
 echo "Background mode: ${BACKGROUND_MODE}"
 echo "Status command: ${STATUS_HINT}"
