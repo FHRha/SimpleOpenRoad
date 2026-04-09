@@ -1,0 +1,2 @@
+[console_scripts]
+sor = app.cli.app:cli_app

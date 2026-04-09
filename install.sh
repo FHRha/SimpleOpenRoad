@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+SimpleOpenRoad installer
+
+Usage:
+  install.sh --repo <owner/repo> [--version <tag>] [--install-dir <path>] [--bin-dir <path>]
+
+Options:
+  --repo        GitHub repository in owner/repo format (required)
+  --version     Release tag (default: latest release tag)
+  --install-dir Target install directory (default: ~/.local/share/simple-open-road)
+  --bin-dir     Directory for wrapper binary (default: ~/.local/bin)
+  -h, --help    Show this help
+
+Examples:
+  curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --repo <owner>/<repo>
+  curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --repo <owner>/<repo> --version v0.1.0
+EOF
+}
+
+BACKGROUND_MODE=""
+STATUS_HINT=""
+
+setup_background_runtime() {
+  local config_path="${INSTALL_DIR}/config/config.yaml"
+
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    echo "Configuring background service (systemd)"
+    if [[ "${EUID}" -eq 0 ]]; then
+      "${BIN_DIR}/sor" service install --mode system --config-path "${config_path}"
+      echo "Service mode: system"
+      BACKGROUND_MODE="systemd-system"
+      STATUS_HINT="${BIN_DIR}/sor service status --mode system"
+    else
+      "${BIN_DIR}/sor" service install --mode user --config-path "${config_path}"
+      echo "Service mode: user"
+      BACKGROUND_MODE="systemd-user"
+      STATUS_HINT="${BIN_DIR}/sor service status --mode user"
+      if command -v loginctl >/dev/null 2>&1; then
+        if loginctl enable-linger "${USER}" >/dev/null 2>&1; then
+          echo "Enabled linger for ${USER} (service survives logout)."
+        else
+          echo "Warning: could not enable linger automatically."
+          echo "Run manually for logout persistence: sudo loginctl enable-linger ${USER}"
+        fi
+      fi
+    fi
+    return
+  fi
+
+  echo "systemd not detected; falling back to nohup background process"
+  mkdir -p "${INSTALL_DIR}/run"
+  nohup "${BIN_DIR}/sor" start --config-path "${config_path}" \
+    >"${INSTALL_DIR}/run/sor.out.log" 2>"${INSTALL_DIR}/run/sor.err.log" < /dev/null &
+  echo "$!" > "${INSTALL_DIR}/run/sor.pid"
+  echo "Background process started with PID $(cat "${INSTALL_DIR}/run/sor.pid")"
+  BACKGROUND_MODE="nohup"
+  STATUS_HINT="tail -n 100 ${INSTALL_DIR}/run/sor.out.log"
+}
+
+if [[ "${OSTYPE:-}" != linux* ]]; then
+  echo "This installer currently supports Linux only." >&2
+  exit 1
+fi
+
+REPO=""
+TAG=""
+INSTALL_DIR="${HOME}/.local/share/simple-open-road"
+BIN_DIR="${HOME}/.local/bin"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --repo)
+      REPO="$2"
+      shift 2
+      ;;
+    --version)
+      TAG="$2"
+      shift 2
+      ;;
+    --install-dir)
+      INSTALL_DIR="$2"
+      shift 2
+      ;;
+    --bin-dir)
+      BIN_DIR="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "${REPO}" ]]; then
+  echo "--repo is required." >&2
+  usage
+  exit 1
+fi
+
+if [[ -z "${TAG}" ]]; then
+  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+fi
+
+if [[ -z "${TAG}" ]]; then
+  echo "Unable to resolve release tag for ${REPO}." >&2
+  exit 1
+fi
+
+VERSION="${TAG#v}"
+ARCHIVE_NAME="simple-open-road-${VERSION}-linux-x86_64.tar.gz"
+ARCHIVE_URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE_NAME}"
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+echo "Downloading ${ARCHIVE_URL}"
+curl -fL "${ARCHIVE_URL}" -o "${TMP_DIR}/${ARCHIVE_NAME}"
+
+echo "Extracting archive"
+tar -xzf "${TMP_DIR}/${ARCHIVE_NAME}" -C "${TMP_DIR}"
+EXTRACTED_DIR="${TMP_DIR}/simple-open-road-${VERSION}-linux-x86_64"
+
+if [[ ! -d "${EXTRACTED_DIR}" ]]; then
+  echo "Archive layout is invalid: ${EXTRACTED_DIR} not found." >&2
+  exit 1
+fi
+
+mkdir -p "${INSTALL_DIR}" "${BIN_DIR}"
+cp -R "${EXTRACTED_DIR}/." "${INSTALL_DIR}/"
+
+if [[ ! -f "${INSTALL_DIR}/config/config.yaml" ]]; then
+  cp "${INSTALL_DIR}/config/config.example.yaml" "${INSTALL_DIR}/config/config.yaml"
+fi
+
+echo "Creating virtual environment"
+python3 -m venv "${INSTALL_DIR}/.venv"
+
+echo "Installing SimpleOpenRoad"
+"${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
+"${INSTALL_DIR}/.venv/bin/python" -m pip install -e "${INSTALL_DIR}"
+
+cat > "${BIN_DIR}/sor" <<EOF
+#!/usr/bin/env bash
+exec "${INSTALL_DIR}/.venv/bin/sor" "\$@"
+EOF
+chmod +x "${BIN_DIR}/sor"
+
+setup_background_runtime
+
+echo "Installation complete"
+echo "Binary: ${BIN_DIR}/sor"
+echo "Config: ${INSTALL_DIR}/config/config.yaml"
+echo "Background mode: ${BACKGROUND_MODE}"
+echo "Status command: ${STATUS_HINT}"
