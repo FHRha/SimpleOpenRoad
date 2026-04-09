@@ -149,12 +149,12 @@ setup_background_runtime() {
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     echo "Configuring background service (systemd)"
     if [[ "${EUID}" -eq 0 ]]; then
-      "${BIN_DIR}/sor" service install --mode system --config-path "${config_path}"
+      PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/sor" service install --mode system --config-path "${config_path}"
       echo "Service mode: system"
       BACKGROUND_MODE="systemd-system"
       STATUS_HINT="${BIN_DIR}/sor service status --mode system"
     else
-      "${BIN_DIR}/sor" service install --mode user --config-path "${config_path}"
+      PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/sor" service install --mode user --config-path "${config_path}"
       echo "Service mode: user"
       BACKGROUND_MODE="systemd-user"
       STATUS_HINT="${BIN_DIR}/sor service status --mode user"
@@ -281,11 +281,21 @@ if [[ ! -f "${INSTALL_DIR}/config/config.yaml" ]]; then
 fi
 
 echo "Creating virtual environment"
-if [[ -d "${INSTALL_DIR}/.venv" ]]; then
-  echo "Removing existing virtual environment"
-  rm -rf "${INSTALL_DIR}/.venv"
+if [[ -x "${INSTALL_DIR}/.venv/bin/python" ]]; then
+  if "${INSTALL_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+  then
+    echo "Reusing existing virtual environment"
+  else
+    echo "Existing virtual environment uses Python < 3.11; recreating"
+    rm -rf "${INSTALL_DIR}/.venv"
+    "${PYTHON_BIN}" -m venv "${INSTALL_DIR}/.venv"
+  fi
+else
+  "${PYTHON_BIN}" -m venv "${INSTALL_DIR}/.venv"
 fi
-"${PYTHON_BIN}" -m venv "${INSTALL_DIR}/.venv"
 
 if ! "${INSTALL_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
 import sys

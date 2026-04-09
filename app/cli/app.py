@@ -238,10 +238,19 @@ def _run_systemctl(mode: str, *args: str, check: bool = True) -> subprocess.Comp
 
 
 def _service_exec_start(config_path: str) -> str:
-    sor_executable = shutil.which("sor")
+    argv_executable = Path(sys.argv[0]).expanduser()
+    sor_executable: Path | None = None
+    if argv_executable.exists():
+        sor_executable = argv_executable.resolve()
+    else:
+        discovered = shutil.which("sor")
+        if discovered is not None:
+            sor_executable = Path(discovered).resolve()
+
     if sor_executable is None:
-        raise typer.BadParameter("sor executable was not found in PATH")
-    quoted_exec = shlex.quote(str(Path(sor_executable).resolve()))
+        raise typer.BadParameter("sor executable was not found (argv[0] or PATH)")
+
+    quoted_exec = shlex.quote(str(sor_executable))
     quoted_cfg = shlex.quote(str(Path(config_path).resolve()))
     return f"{quoted_exec} start --config-path {quoted_cfg}"
 
