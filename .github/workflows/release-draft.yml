@@ -20,8 +20,13 @@ concurrency:
 jobs:
   build-and-attach-archive:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      ARCH: ${{ matrix.arch }}
 
     steps:
       - name: Checkout
@@ -37,7 +42,7 @@ jobs:
       - name: Build Linux archive
         run: |
           chmod +x ./scripts/build_linux_release.sh
-          ./scripts/build_linux_release.sh "${RELEASE_TAG}"
+          ARCH="${ARCH}" ./scripts/build_linux_release.sh "${RELEASE_TAG}"
 
       - name: Upload archive to release
         uses: softprops/action-gh-release@v2

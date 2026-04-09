@@ -6,11 +6,12 @@ usage() {
 SimpleOpenRoad installer
 
 Usage:
-  install.sh [--repo <owner/repo>] [--version <tag>] [--install-dir <path>] [--bin-dir <path>]
+  install.sh [--repo <owner/repo>] [--version <tag>] [--arch <x86_64|arm64>] [--install-dir <path>] [--bin-dir <path>]
 
 Options:
   --repo        GitHub repository in owner/repo format (default: FHRha/SimpleOpenRoad)
   --version     Release tag (default: latest release tag)
+  --arch        Target archive architecture (default: auto-detect from uname -m)
   --install-dir Target install directory (default: ~/.local/share/simple-open-road)
   --bin-dir     Directory for wrapper binary (default: ~/.local/bin)
   -h, --help    Show this help
@@ -23,6 +24,43 @@ EOF
 
 BACKGROUND_MODE=""
 STATUS_HINT=""
+
+detect_arch() {
+  local machine
+  machine="$(uname -m)"
+
+  case "${machine}" in
+    x86_64|amd64)
+      echo "x86_64"
+      ;;
+    aarch64|arm64)
+      echo "arm64"
+      ;;
+    *)
+      echo "Unsupported architecture: ${machine}" >&2
+      echo "Use --arch to override. Supported values: x86_64, arm64" >&2
+      exit 1
+      ;;
+  esac
+}
+
+normalize_arch() {
+  local value
+  value="${1:-}"
+  case "${value}" in
+    x86_64|amd64)
+      echo "x86_64"
+      ;;
+    arm64|aarch64)
+      echo "arm64"
+      ;;
+    *)
+      echo "Unsupported --arch value: ${value}" >&2
+      echo "Supported values: x86_64, arm64" >&2
+      exit 1
+      ;;
+  esac
+}
 
 setup_background_runtime() {
   local config_path="${INSTALL_DIR}/config/config.yaml"
@@ -69,6 +107,7 @@ fi
 DEFAULT_REPO="FHRha/SimpleOpenRoad"
 REPO="${DEFAULT_REPO}"
 TAG=""
+ARCH=""
 INSTALL_DIR="${HOME}/.local/share/simple-open-road"
 BIN_DIR="${HOME}/.local/bin"
 
@@ -80,6 +119,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --version)
       TAG="$2"
+      shift 2
+      ;;
+    --arch)
+      ARCH="$2"
       shift 2
       ;;
     --install-dir)
@@ -102,6 +145,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "${ARCH}" ]]; then
+  ARCH="$(normalize_arch "${ARCH}")"
+else
+  ARCH="$(detect_arch)"
+fi
+
 if [[ -z "${TAG}" ]]; then
   TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 fi
@@ -112,7 +161,7 @@ if [[ -z "${TAG}" ]]; then
 fi
 
 VERSION="${TAG#v}"
-ARCHIVE_NAME="simple-open-road-${VERSION}-linux-x86_64.tar.gz"
+ARCHIVE_NAME="simple-open-road-${VERSION}-linux-${ARCH}.tar.gz"
 ARCHIVE_URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE_NAME}"
 
 TMP_DIR="$(mktemp -d)"
@@ -123,7 +172,7 @@ curl -fL "${ARCHIVE_URL}" -o "${TMP_DIR}/${ARCHIVE_NAME}"
 
 echo "Extracting archive"
 tar -xzf "${TMP_DIR}/${ARCHIVE_NAME}" -C "${TMP_DIR}"
-EXTRACTED_DIR="${TMP_DIR}/simple-open-road-${VERSION}-linux-x86_64"
+EXTRACTED_DIR="${TMP_DIR}/simple-open-road-${VERSION}-linux-${ARCH}"
 
 if [[ ! -d "${EXTRACTED_DIR}" ]]; then
   echo "Archive layout is invalid: ${EXTRACTED_DIR} not found." >&2
@@ -155,5 +204,6 @@ setup_background_runtime
 echo "Installation complete"
 echo "Binary: ${BIN_DIR}/sor"
 echo "Config: ${INSTALL_DIR}/config/config.yaml"
+echo "Architecture: ${ARCH}"
 echo "Background mode: ${BACKGROUND_MODE}"
 echo "Status command: ${STATUS_HINT}"

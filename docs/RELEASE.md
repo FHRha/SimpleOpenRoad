@@ -8,11 +8,17 @@ Build and publish a Linux release archive that can be installed with the root in
 
 The installer expects this exact file pattern:
 
-- simple-open-road-<version>-linux-x86_64.tar.gz
+- simple-open-road-<version>-linux-<arch>.tar.gz
+
+Supported architectures:
+
+- x86_64
+- arm64
 
 Example for version 0.1.0:
 
 - simple-open-road-0.1.0-linux-x86_64.tar.gz
+- simple-open-road-0.1.0-linux-arm64.tar.gz
 
 ## Build Archive
 
@@ -26,7 +32,7 @@ Optional explicit version:
 
 Output:
 
-- dist/simple-open-road-<version>-linux-x86_64.tar.gz
+- dist/simple-open-road-<version>-linux-<arch>.tar.gz
 
 ## Publish to GitHub Release
 
@@ -45,6 +51,7 @@ The tag and archive name must match, otherwise install.sh download URL will fail
 ## Automation Behavior
 
 - GitHub Actions builds and uploads the Linux archive when a release is published.
+- GitHub Actions uploads both x86_64 and arm64 archives for each published release.
 - If you need to rebuild asset for an existing tag, run the workflow manually with `tag` input.
 
 ## Install Flow for Users
@@ -64,5 +71,6 @@ Override repository (for forks):
 ## Notes
 
 - Installer supports Linux only.
+- Installer auto-detects architecture and downloads matching archive.
 - Default install path is ~/.local/share/simple-open-road.
 - Wrapper binary is created at ~/.local/bin/sor.

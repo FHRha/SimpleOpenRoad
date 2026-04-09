@@ -34,6 +34,8 @@ Install a specific version:
 curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash -s -- --version v0.1.0
 ```
 
+Installer selects release archive automatically by CPU architecture (`x86_64`/`arm64`).
+
 ### Option B: local source setup
 
 ```bash
