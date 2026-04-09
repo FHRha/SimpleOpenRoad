@@ -238,6 +238,8 @@ fi
 
 resolve_python_bin
 
+echo "Using Python runtime: ${PYTHON_BIN}"
+
 if [[ -z "${TAG}" ]]; then
   TAG="$(resolve_release_tag || true)"
 fi
@@ -279,7 +281,21 @@ if [[ ! -f "${INSTALL_DIR}/config/config.yaml" ]]; then
 fi
 
 echo "Creating virtual environment"
+if [[ -d "${INSTALL_DIR}/.venv" ]]; then
+  echo "Removing existing virtual environment"
+  rm -rf "${INSTALL_DIR}/.venv"
+fi
 "${PYTHON_BIN}" -m venv "${INSTALL_DIR}/.venv"
+
+if ! "${INSTALL_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+then
+  echo "Created virtual environment is using Python < 3.11." >&2
+  echo "Remove ${INSTALL_DIR}/.venv and rerun installer with --python <python3.11+ binary>." >&2
+  exit 1
+fi
 
 echo "Installing SimpleOpenRoad"
 "${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
