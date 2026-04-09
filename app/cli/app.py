@@ -29,7 +29,11 @@ from app.container import AppContainer
 from app.core.errors import ConfigError
 from app.core.utils import mask_secret
 
-cli_app = typer.Typer(help="SimpleOpenRoad AI gateway CLI")
+cli_app = typer.Typer(
+    help="SimpleOpenRoad AI gateway CLI",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
 providers_app = typer.Typer(help="Provider operations")
 keys_app = typer.Typer(help="API key operations")
 routes_app = typer.Typer(help="Routing operations")
@@ -52,6 +56,12 @@ _PLACEHOLDER_ENV_VALUES = {
     "change-me-admin-key",
     "",
 }
+
+
+@cli_app.callback()
+def cli_entrypoint(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is None:
+        _run_management_panel(config_path="config/config.yaml")
 
 
 def _config_path(value: str | None) -> Path:
@@ -859,40 +869,57 @@ def service_logs(
     console.print(text)
 
 
-@cli_app.command("panel")
-def panel(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
-    console.print("SimpleOpenRoad Service Panel")
+def _run_management_panel(config_path: str) -> None:
+    console.print("SimpleOpenRoad Management Panel")
     while True:
-        console.print("1) Install system service")
-        console.print("2) Start service")
-        console.print("3) Stop service")
-        console.print("4) Restart service")
-        console.print("5) Service status")
-        console.print("6) Show service logs")
-        console.print("7) Setup summary (API URL)")
-        console.print("8) Uninstall service")
-        console.print("9) Exit")
-        choice = typer.prompt("Select option", default="5").strip()
+        console.print("1) Setup summary (API URL)")
+        console.print("2) Doctor report")
+        console.print("3) List providers")
+        console.print("4) Add provider key (wizard)")
+        console.print("5) List keys")
+        console.print("6) Validate all keys")
+        console.print("7) Show runtime stats")
+        console.print("8) Install system service")
+        console.print("9) Start service")
+        console.print("10) Stop service")
+        console.print("11) Restart service")
+        console.print("12) Service status")
+        console.print("13) Show service logs")
+        console.print("14) Uninstall service")
+        console.print("15) Exit")
+        choice = typer.prompt("Select option", default="1").strip()
 
         try:
             if choice == "1":
-                service_install(config_path=config_path, mode="system", run_as=None, start=True)
-            elif choice == "2":
-                service_start(mode="system")
-            elif choice == "3":
-                service_stop(mode="system")
-            elif choice == "4":
-                service_restart(mode="system")
-            elif choice == "5":
-                service_status(mode="system")
-            elif choice == "6":
-                service_logs(mode="system", lines=100)
-            elif choice == "7":
                 cfg = load_gateway_config(config_path=config_path)
                 _print_setup_summary(config_path=config_path, cfg=cfg)
+            elif choice == "2":
+                doctor(config_path=config_path)
+            elif choice == "3":
+                providers_list(config_path=config_path)
+            elif choice == "4":
+                _interactive_add_provider_key(config_path=config_path)
+            elif choice == "5":
+                keys_list(config_path=config_path)
+            elif choice == "6":
+                keys_validate(provider=None, key_id=None, config_path=config_path)
+            elif choice == "7":
+                stats(config_path=config_path)
             elif choice == "8":
-                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
+                service_install(config_path=config_path, mode="system", run_as=None, start=True)
             elif choice == "9":
+                service_start(mode="system")
+            elif choice == "10":
+                service_stop(mode="system")
+            elif choice == "11":
+                service_restart(mode="system")
+            elif choice == "12":
+                service_status(mode="system")
+            elif choice == "13":
+                service_logs(mode="system", lines=100)
+            elif choice == "14":
+                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
+            elif choice == "15":
                 return
             else:
                 console.print("Unknown option")
@@ -900,20 +927,11 @@ def panel(config_path: str = typer.Option("config/config.yaml", help="Path to co
             console.print(f"Operation failed: {exc}")
 
 
+@cli_app.command("panel")
+def panel(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
+    _run_management_panel(config_path=config_path)
+
+
 @cli_app.command("menu")
 def menu(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
-    console.print("Interactive menu")
-    console.print("1) Add provider key (wizard)")
-    console.print("2) Validate all keys")
-    console.print("3) List keys")
-    choice = typer.prompt("Select option", default="3")
-
-    if choice == "1":
-        _interactive_add_provider_key(config_path=config_path)
-        return
-
-    if choice == "2":
-        keys_validate(provider=None, key_id=None, config_path=config_path)
-        return
-
-    keys_list(config_path=config_path)
+    _run_management_panel(config_path=config_path)

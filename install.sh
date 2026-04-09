@@ -192,6 +192,11 @@ ARCH=""
 INSTALL_DIR="${HOME}/.local/share/simple-open-road"
 BIN_DIR="${HOME}/.local/bin"
 
+# Root installs should expose CLI globally by default.
+if [[ "${EUID}" -eq 0 ]] && [[ -d "/usr/local/bin" ]] && [[ -w "/usr/local/bin" ]]; then
+  BIN_DIR="/usr/local/bin"
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo)
@@ -313,6 +318,7 @@ echo "Installing SimpleOpenRoad"
 
 cat > "${BIN_DIR}/sor" <<EOF
 #!/usr/bin/env bash
+cd "${INSTALL_DIR}"
 exec "${INSTALL_DIR}/.venv/bin/sor" "\$@"
 EOF
 chmod +x "${BIN_DIR}/sor"
@@ -326,3 +332,10 @@ echo "Architecture: ${ARCH}"
 echo "Python binary: ${PYTHON_BIN}"
 echo "Background mode: ${BACKGROUND_MODE}"
 echo "Status command: ${STATUS_HINT}"
+echo "OpenAPI docs: http://127.0.0.1:12345/docs"
+echo "Management terminal: sor"
+
+if ! command -v sor >/dev/null 2>&1; then
+  echo "Note: 'sor' is not available in PATH for this shell."
+  echo "Run: export PATH=\"${BIN_DIR}:\$PATH\""
+fi

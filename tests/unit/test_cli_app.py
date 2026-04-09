@@ -61,6 +61,37 @@ def test_cli_config_validate(tmp_path: Path) -> None:
     assert "Config OK" in result.stdout
 
 
+def test_cli_without_args_opens_management_panel(monkeypatch) -> None:
+    runner = CliRunner()
+    called: dict[str, str] = {}
+
+    def _fake_panel(config_path: str) -> None:
+        called["config_path"] = config_path
+
+    monkeypatch.setattr("app.cli.app._run_management_panel", _fake_panel)
+
+    result = runner.invoke(cli_app, [])
+
+    assert result.exit_code == 0
+    assert called["config_path"] == "config/config.yaml"
+
+
+def test_cli_menu_command_uses_management_panel(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    called: dict[str, str] = {}
+
+    def _fake_panel(config_path: str) -> None:
+        called["config_path"] = config_path
+
+    monkeypatch.setattr("app.cli.app._run_management_panel", _fake_panel)
+
+    result = runner.invoke(cli_app, ["menu", "--config-path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert called["config_path"] == str(config_path)
+
+
 def test_cli_routes_set_priority(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)

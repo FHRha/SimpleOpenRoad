@@ -85,6 +85,11 @@ sudo sor service logs --mode system --lines 200
 
 Terminal panel:
 ```bash
+sor
+```
+
+Explicit panel command:
+```bash
 sor panel --config-path config/config.yaml
 ```
 

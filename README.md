@@ -19,6 +19,7 @@ Use it when you want your applications to keep working even if one model, one pr
 - Multi-key registry with runtime state and cooldown logic.
 - Error-aware retry and failover policy.
 - CLI and admin API for day-to-day operations.
+- Terminal panel via `sor` or `sor panel`; web operations via `/docs` and admin API endpoints.
 
 ## Install
 
