@@ -6,18 +6,18 @@ usage() {
 SimpleOpenRoad installer
 
 Usage:
-  install.sh --repo <owner/repo> [--version <tag>] [--install-dir <path>] [--bin-dir <path>]
+  install.sh [--repo <owner/repo>] [--version <tag>] [--install-dir <path>] [--bin-dir <path>]
 
 Options:
-  --repo        GitHub repository in owner/repo format (required)
+  --repo        GitHub repository in owner/repo format (default: FHRha/SimpleOpenRoad)
   --version     Release tag (default: latest release tag)
   --install-dir Target install directory (default: ~/.local/share/simple-open-road)
   --bin-dir     Directory for wrapper binary (default: ~/.local/bin)
   -h, --help    Show this help
 
 Examples:
-  curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --repo <owner>/<repo>
-  curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --repo <owner>/<repo> --version v0.1.0
+  curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash -s -- --version v0.1.0
 EOF
 }
 
@@ -66,7 +66,8 @@ if [[ "${OSTYPE:-}" != linux* ]]; then
   exit 1
 fi
 
-REPO=""
+DEFAULT_REPO="FHRha/SimpleOpenRoad"
+REPO="${DEFAULT_REPO}"
 TAG=""
 INSTALL_DIR="${HOME}/.local/share/simple-open-road"
 BIN_DIR="${HOME}/.local/bin"
@@ -100,12 +101,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ -z "${REPO}" ]]; then
-  echo "--repo is required." >&2
-  usage
-  exit 1
-fi
 
 if [[ -z "${TAG}" ]]; then
   TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"

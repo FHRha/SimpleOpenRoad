@@ -51,11 +51,15 @@ The tag and archive name must match, otherwise install.sh download URL will fail
 
 Latest release:
 
-- curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --repo <owner>/<repo>
+- curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash
 
 Specific version:
 
-- curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | bash -s -- --repo <owner>/<repo> --version v0.1.0
+- curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash -s -- --version v0.1.0
+
+Override repository (for forks):
+
+- curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash -s -- --repo <owner>/<repo>
 
 ## Notes
 
