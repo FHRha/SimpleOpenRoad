@@ -62,6 +62,32 @@ normalize_arch() {
   esac
 }
 
+extract_first_tag_name() {
+  sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+}
+
+resolve_release_tag() {
+  local latest_json=""
+  local releases_json=""
+  local tag=""
+
+  latest_json="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" || true)"
+  tag="$(printf '%s' "${latest_json}" | extract_first_tag_name)"
+  if [[ -n "${tag}" ]]; then
+    echo "${tag}"
+    return 0
+  fi
+
+  releases_json="$(curl -sSL "https://api.github.com/repos/${REPO}/releases?per_page=20" || true)"
+  tag="$(printf '%s' "${releases_json}" | extract_first_tag_name)"
+  if [[ -n "${tag}" ]]; then
+    echo "${tag}"
+    return 0
+  fi
+
+  return 1
+}
+
 setup_background_runtime() {
   local config_path="${INSTALL_DIR}/config/config.yaml"
 
@@ -152,11 +178,12 @@ else
 fi
 
 if [[ -z "${TAG}" ]]; then
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+  TAG="$(resolve_release_tag || true)"
 fi
 
 if [[ -z "${TAG}" ]]; then
   echo "Unable to resolve release tag for ${REPO}." >&2
+  echo "Create or publish at least one release, or pass --version <tag>." >&2
   exit 1
 fi
 
@@ -168,7 +195,11 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
 echo "Downloading ${ARCHIVE_URL}"
-curl -fL "${ARCHIVE_URL}" -o "${TMP_DIR}/${ARCHIVE_NAME}"
+if ! curl -fL "${ARCHIVE_URL}" -o "${TMP_DIR}/${ARCHIVE_NAME}"; then
+  echo "Failed to download release archive: ${ARCHIVE_URL}" >&2
+  echo "Check that release ${TAG} contains asset ${ARCHIVE_NAME}, or override with --version/--arch." >&2
+  exit 1
+fi
 
 echo "Extracting archive"
 tar -xzf "${TMP_DIR}/${ARCHIVE_NAME}" -C "${TMP_DIR}"
