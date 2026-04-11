@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
+SELF_REEXEC_DONE="${SOR_INSTALL_SELF_REEXEC_DONE:-0}"
+
 usage() {
   cat <<'EOF'
 SimpleOpenRoad installer
@@ -135,6 +138,33 @@ normalize_release_channel() {
       exit 1
       ;;
   esac
+}
+
+current_script_path() {
+  local script_dir=""
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  printf '%s/%s\n' "${script_dir}" "$(basename "${BASH_SOURCE[0]}")"
+}
+
+maybe_reexec_from_temp_copy() {
+  local script_path=""
+  local install_script_path=""
+  local temp_script=""
+
+  if [[ "${SELF_REEXEC_DONE}" == "1" ]]; then
+    return
+  fi
+
+  script_path="$(current_script_path)"
+  install_script_path="${INSTALL_DIR%/}/install.sh"
+  if [[ "${script_path}" != "${install_script_path}" ]]; then
+    return
+  fi
+
+  temp_script="$(mktemp "${TMPDIR:-/tmp}/simple-open-road-installer.XXXXXX.sh")"
+  cp "${script_path}" "${temp_script}"
+  chmod +x "${temp_script}"
+  exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"
 }
 
 extract_release_tag_for_channel() {
@@ -433,6 +463,8 @@ fi
 resolve_python_bin
 
 echo "Using Python runtime: ${PYTHON_BIN}"
+
+maybe_reexec_from_temp_copy
 
 if [[ -n "${TAG}" && -n "${SOURCE_REF}" ]]; then
   echo "Use either --version or --ref, not both." >&2

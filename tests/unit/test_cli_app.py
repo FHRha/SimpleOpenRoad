@@ -54,6 +54,16 @@ def _write_config(tmp_path: Path) -> Path:
     return path
 
 
+def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
+    install_script = (Path(__file__).resolve().parents[2] / "install.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "SOR_INSTALL_SELF_REEXEC_DONE" in install_script
+    assert "maybe_reexec_from_temp_copy" in install_script
+    assert 'exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"' in install_script
+
+
 def test_cli_config_validate(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
