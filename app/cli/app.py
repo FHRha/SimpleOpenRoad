@@ -1704,7 +1704,7 @@ def _run_service_panel(config_path: str) -> None:
             _pause()
 
 
-def _run_maintenance_panel(config_path: str) -> None:
+def _run_maintenance_panel(config_path: str) -> bool:
     while True:
         _print_menu(
             title="SimpleOpenRoad / Maintenance",
@@ -1722,9 +1722,9 @@ def _run_maintenance_panel(config_path: str) -> None:
                 _pause()
             elif choice == "2":
                 uninstall(config_path=config_path, mode="system", full=True, yes=False)
-                _pause()
+                return True
             elif choice == "0":
-                return
+                return False
             else:
                 console.print("Unknown option")
                 _pause()
@@ -1755,7 +1755,8 @@ def _run_management_panel(config_path: str) -> None:
         elif choice == "3":
             _run_service_panel(config_path=config_path)
         elif choice == "4":
-            _run_maintenance_panel(config_path=config_path)
+            if _run_maintenance_panel(config_path=config_path):
+                return
         elif choice == "0":
             return
         else:

@@ -129,6 +129,29 @@ def test_cli_api_access_section_waits_before_back(monkeypatch) -> None:
     assert "Press Enter to return" in result.stdout
 
 
+def test_cli_panel_exits_after_full_uninstall(monkeypatch) -> None:
+    runner = CliRunner()
+    called: dict[str, bool] = {}
+
+    def _fake_uninstall(
+        config_path: str,
+        mode: str,
+        purge_data: bool = False,
+        remove_config: bool = False,
+        full: bool = False,
+        yes: bool = False,
+    ) -> None:
+        called["full"] = full
+        called["yes"] = yes
+
+    monkeypatch.setattr("app.cli.app.uninstall", _fake_uninstall)
+
+    result = runner.invoke(cli_app, ["panel"], input="4\n2\n")
+
+    assert result.exit_code == 0
+    assert called == {"full": True, "yes": False}
+
+
 def test_cli_cleanup_removes_unconfigured_placeholder_keys(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
