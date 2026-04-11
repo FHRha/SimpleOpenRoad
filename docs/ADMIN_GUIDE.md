@@ -125,6 +125,12 @@ Update package while preserving user settings:
 sor update
 ```
 
+Choose release channel:
+```bash
+sor update --channel stable
+sor update --channel prerelease
+```
+
 Test unreleased changes from the main branch:
 ```bash
 sor update --ref main

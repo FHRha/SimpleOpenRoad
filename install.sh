@@ -12,6 +12,7 @@ Options:
   --repo        GitHub repository in owner/repo format (default: FHRha/SimpleOpenRoad)
   --version     Release tag (default: latest release tag)
   --ref         Install source archive from a Git ref/branch instead of a release
+  --channel     Release channel: stable or prerelease (default: stable)
   --arch        Target archive architecture (default: auto-detect from uname -m)
   --python      Preferred Python binary (must be >= 3.11)
   --install-dir Target install directory (default: ~/.local/share/simple-open-road, or /usr/local/share/simple-open-road for root)
@@ -122,20 +123,81 @@ extract_first_tag_name() {
   sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
 
+normalize_release_channel() {
+  local value="${1:-stable}"
+  case "${value}" in
+    stable|prerelease)
+      echo "${value}"
+      ;;
+    *)
+      echo "Unsupported --channel value: ${value}" >&2
+      echo "Supported values: stable, prerelease" >&2
+      exit 1
+      ;;
+  esac
+}
+
+extract_release_tag_for_channel() {
+  local channel="$1"
+  python3 -c '
+import json
+import sys
+
+channel = sys.argv[1]
+payload = json.load(sys.stdin)
+
+if isinstance(payload, dict):
+    tag = payload.get("tag_name")
+    if isinstance(tag, str) and tag.strip():
+        print(tag.strip())
+    raise SystemExit(0)
+
+if isinstance(payload, list):
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        is_prerelease = bool(item.get("prerelease"))
+        if channel == "prerelease" and not is_prerelease:
+            continue
+        if channel == "stable" and is_prerelease:
+            continue
+        tag = item.get("tag_name")
+        if isinstance(tag, str) and tag.strip():
+            print(tag.strip())
+            raise SystemExit(0)
+' "$channel"
+}
+
+prompt_release_channel() {
+  local selected="stable"
+  if [[ -t 0 ]]; then
+    printf "Install channel [stable/prerelease] (default: stable): " >/dev/tty
+    read -r selected </dev/tty || true
+  elif [[ -r /dev/tty ]]; then
+    printf "Install channel [stable/prerelease] (default: stable): " >/dev/tty
+    read -r selected </dev/tty || true
+  fi
+  selected="${selected:-stable}"
+  normalize_release_channel "${selected}"
+}
+
 resolve_release_tag() {
+  local channel="$1"
   local latest_json=""
   local releases_json=""
   local tag=""
 
-  latest_json="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" || true)"
-  tag="$(printf '%s' "${latest_json}" | extract_first_tag_name)"
-  if [[ -n "${tag}" ]]; then
-    echo "${tag}"
-    return 0
+  if [[ "${channel}" == "stable" ]]; then
+    latest_json="$(curl -sSL "https://api.github.com/repos/${REPO}/releases/latest" || true)"
+    tag="$(printf '%s' "${latest_json}" | extract_release_tag_for_channel stable || true)"
+    if [[ -n "${tag}" ]]; then
+      echo "${tag}"
+      return 0
+    fi
   fi
 
   releases_json="$(curl -sSL "https://api.github.com/repos/${REPO}/releases?per_page=20" || true)"
-  tag="$(printf '%s' "${releases_json}" | extract_first_tag_name)"
+  tag="$(printf '%s' "${releases_json}" | extract_release_tag_for_channel "${channel}" || true)"
   if [[ -n "${tag}" ]]; then
     echo "${tag}"
     return 0
@@ -287,6 +349,8 @@ DEFAULT_REPO="FHRha/SimpleOpenRoad"
 REPO="${DEFAULT_REPO}"
 TAG=""
 SOURCE_REF=""
+RELEASE_CHANNEL="stable"
+RELEASE_CHANNEL_EXPLICIT=0
 ARCH=""
 INSTALL_DIR="${HOME}/.local/share/simple-open-road"
 BIN_DIR="${HOME}/.local/bin"
@@ -313,6 +377,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --ref)
       SOURCE_REF="$2"
+      shift 2
+      ;;
+    --channel)
+      RELEASE_CHANNEL="$2"
+      RELEASE_CHANNEL_EXPLICIT=1
       shift 2
       ;;
     --arch)
@@ -345,6 +414,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+RELEASE_CHANNEL="$(normalize_release_channel "${RELEASE_CHANNEL}")"
+
 if [[ "${INSTALL_DIR_EXPLICIT}" -eq 0 ]]; then
   EXISTING_INSTALL_DIR="$(detect_existing_install_dir || true)"
   if [[ -n "${EXISTING_INSTALL_DIR}" ]]; then
@@ -368,13 +439,17 @@ if [[ -n "${TAG}" && -n "${SOURCE_REF}" ]]; then
   exit 1
 fi
 
+if [[ -z "${TAG}" && -z "${SOURCE_REF}" && "${RELEASE_CHANNEL_EXPLICIT}" -eq 0 ]]; then
+  RELEASE_CHANNEL="$(prompt_release_channel)"
+fi
+
 if [[ -z "${TAG}" && -z "${SOURCE_REF}" ]]; then
-  TAG="$(resolve_release_tag || true)"
+  TAG="$(resolve_release_tag "${RELEASE_CHANNEL}" || true)"
 fi
 
 if [[ -z "${TAG}" && -z "${SOURCE_REF}" ]]; then
   echo "Unable to resolve release tag for ${REPO}." >&2
-  echo "Create or publish at least one release, or pass --version <tag>." >&2
+  echo "Create or publish at least one ${RELEASE_CHANNEL} release, or pass --version <tag>." >&2
   exit 1
 fi
 
@@ -388,7 +463,7 @@ else
   VERSION="${TAG#v}"
   ARCHIVE_NAME="simple-open-road-${VERSION}-linux-${ARCH}.tar.gz"
   ARCHIVE_URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE_NAME}"
-  echo "Installing release: ${TAG}"
+  echo "Installing ${RELEASE_CHANNEL} release: ${TAG}"
 fi
 
 TMP_DIR="$(mktemp -d)"

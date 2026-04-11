@@ -502,10 +502,18 @@ def _extract_release_tag(payload: Any) -> str | None:
     return None
 
 
-def _resolve_latest_release_tag(repo: str) -> str:
+def _normalize_release_channel(channel: str) -> str:
+    normalized = channel.strip().lower()
+    if normalized not in {"stable", "prerelease"}:
+        raise typer.BadParameter("channel must be either 'stable' or 'prerelease'")
+    return normalized
+
+
+def _resolve_latest_release_tag(repo: str, channel: str = "stable") -> str:
     normalized_repo = repo.strip().strip("/")
     if normalized_repo.count("/") != 1:
         raise typer.BadParameter("repo must use owner/repo format")
+    selected_channel = _normalize_release_channel(channel)
 
     headers = {
         "Accept": "application/vnd.github+json",
@@ -515,33 +523,53 @@ def _resolve_latest_release_tag(repo: str) -> str:
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
 
-    urls = [
-        f"https://api.github.com/repos/{normalized_repo}/releases/latest",
-        f"https://api.github.com/repos/{normalized_repo}/releases?per_page=20",
-    ]
+    urls = [f"https://api.github.com/repos/{normalized_repo}/releases?per_page=20"]
+    if selected_channel == "stable":
+        urls.insert(0, f"https://api.github.com/repos/{normalized_repo}/releases/latest")
     last_error = ""
     for url in urls:
         try:
             response = httpx.get(url, headers=headers, timeout=15.0)
             response.raise_for_status()
-            tag = _extract_release_tag(response.json())
+            payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
             last_error = str(exc)
             continue
+        if isinstance(payload, list):
+            if selected_channel == "prerelease":
+                tag = next(
+                    (
+                        str(item.get("tag_name")).strip()
+                        for item in payload
+                        if isinstance(item, dict) and item.get("prerelease") and item.get("tag_name")
+                    ),
+                    "",
+                )
+            else:
+                tag = next(
+                    (
+                        str(item.get("tag_name")).strip()
+                        for item in payload
+                        if isinstance(item, dict) and not item.get("prerelease") and item.get("tag_name")
+                    ),
+                    "",
+                )
+        else:
+            tag = _extract_release_tag(payload)
         if tag:
             return tag
 
     hint = f": {last_error}" if last_error else ""
     raise typer.BadParameter(
-        f"Unable to resolve latest release tag for {normalized_repo}{hint}. "
+        f"Unable to resolve latest {selected_channel} release tag for {normalized_repo}{hint}. "
         "Pass --version <tag> explicitly."
     )
 
 
-def _resolve_update_version(repo: str, requested_version: str | None) -> str:
+def _resolve_update_version(repo: str, requested_version: str | None, channel: str = "stable") -> str:
     if requested_version:
         return requested_version
-    return _resolve_latest_release_tag(repo)
+    return _resolve_latest_release_tag(repo, channel=channel)
 
 
 def _build_update_command(
@@ -550,6 +578,7 @@ def _build_update_command(
     repo: str,
     version: str | None,
     ref: str | None,
+    channel: str,
     arch: str | None,
     python_bin: str | None,
 ) -> list[str]:
@@ -571,6 +600,8 @@ def _build_update_command(
         command.extend(["--version", version])
     if ref:
         command.extend(["--ref", ref])
+    if channel != "stable":
+        command.extend(["--channel", channel])
     if arch:
         command.extend(["--arch", arch])
     if python_bin:
@@ -1191,6 +1222,7 @@ def _run_update(
     repo: str = "FHRha/SimpleOpenRoad",
     version: str | None = None,
     ref: str | None = None,
+    channel: str = "stable",
     arch: str | None = None,
     python_bin: str | None = None,
     install_dir: str | None = None,
@@ -1199,13 +1231,21 @@ def _run_update(
 ) -> None:
     if version and ref:
         raise typer.BadParameter("Use either --version or --ref, not both")
+    selected_channel = _normalize_release_channel(channel)
 
     if install_dir:
         install_root = Path(install_dir).expanduser().resolve()
     else:
         install_root = _detect_wrapper_install_root() or _guess_install_root(config_path)
     resolved_bin_dir = _resolve_bin_dir(install_root=install_root, explicit_bin_dir=bin_dir)
-    resolved_version = None if ref else _resolve_update_version(repo=repo, requested_version=version)
+    resolved_version = None if ref else _resolve_update_version(
+        repo=repo,
+        requested_version=version,
+        channel=selected_channel,
+    )
+    current_version = _read_installed_version(install_root)
+    normalized_current_version = current_version.lstrip("v")
+    normalized_target_version = resolved_version.lstrip("v") if resolved_version else None
 
     console.print(
         Panel.fit(
@@ -1215,6 +1255,7 @@ def _run_update(
                     f"Binary dir: {resolved_bin_dir}",
                     f"Repo: {repo}",
                     f"Source: Git ref {ref}" if ref else f"Version to install: {resolved_version}",
+                    f"Release channel: {selected_channel}" if not ref else "Release channel: <not used for git ref>",
                     "Preserved: .env, config/config.yaml, data/",
                 ]
             ),
@@ -1223,6 +1264,8 @@ def _run_update(
             box=box.ASCII,
         )
     )
+    if normalized_target_version and normalized_current_version == normalized_target_version:
+        console.print("Installed version is already the latest available for this channel. You can still reinstall it.")
     if not yes and not typer.confirm("Update SimpleOpenRoad now", default=True):
         raise typer.Exit(0)
 
@@ -1232,6 +1275,7 @@ def _run_update(
         repo=repo,
         version=resolved_version,
         ref=ref,
+        channel=selected_channel,
         arch=arch,
         python_bin=python_bin,
     )
@@ -1245,6 +1289,7 @@ def update(
     repo: str = typer.Option("FHRha/SimpleOpenRoad", help="GitHub repository in owner/repo format"),
     version: str | None = typer.Option(None, help="Release tag to install; defaults to latest"),
     ref: str | None = typer.Option(None, help="Git ref/branch to install from source instead of a release"),
+    channel: str = typer.Option("stable", help="Release channel: stable or prerelease"),
     arch: str | None = typer.Option(None, help="Target archive architecture; defaults to auto-detect"),
     python_bin: str | None = typer.Option(None, "--python", help="Python binary for venv creation"),
     install_dir: str | None = typer.Option(None, help="Installed package directory"),
@@ -1256,6 +1301,7 @@ def update(
         repo=repo,
         version=version,
         ref=ref,
+        channel=channel,
         arch=arch,
         python_bin=python_bin,
         install_dir=install_dir,
@@ -1453,6 +1499,15 @@ def _pause() -> None:
     typer.prompt("Press Enter to return", default="", show_default=False)
 
 
+def _prompt_release_channel(default: str = "stable") -> str:
+    choice = typer.prompt(
+        "Release channel [stable/prerelease]",
+        default=default,
+        show_default=True,
+    ).strip()
+    return _normalize_release_channel(choice)
+
+
 def _print_menu(title: str, lines: list[str], config_path: str) -> None:
     console.print(
         Panel.fit(
@@ -1612,7 +1667,8 @@ def _run_service_panel(config_path: str) -> None:
         choice = typer.prompt("Select option", default="1").strip()
         try:
             if choice == "1":
-                _run_update(config_path=config_path, yes=False)
+                release_channel = _prompt_release_channel(default="stable")
+                _run_update(config_path=config_path, channel=release_channel, yes=False)
                 _pause()
             elif choice == "2":
                 _run_update(config_path=config_path, ref="main", yes=False)

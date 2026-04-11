@@ -232,13 +232,13 @@ def test_cli_panel_update_uses_plain_defaults(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr("app.cli.app._resolve_bin_dir", lambda install_root, explicit_bin_dir=None: tmp_path / "bin")
     monkeypatch.setattr(
         "app.cli.app._resolve_update_version",
-        lambda repo, requested_version: requested_version or "v9.9.9",
+        lambda repo, requested_version, channel="stable": requested_version or "v9.9.9",
     )
 
     result = runner.invoke(
         cli_app,
         ["panel", "--config-path", str(config_path)],
-        input="3\n1\ny\n\n0\n0\n",
+        input="3\n1\nstable\ny\n\n0\n0\n",
     )
 
     assert result.exit_code == 0
@@ -271,7 +271,7 @@ def test_cli_update_resolves_latest_before_running_installer(monkeypatch, tmp_pa
     monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
     monkeypatch.setattr(
         "app.cli.app._resolve_update_version",
-        lambda repo, requested_version: requested_version or "v1.2.4",
+        lambda repo, requested_version, channel="stable": requested_version or "v1.2.4",
     )
 
     result = runner.invoke(
@@ -305,6 +305,94 @@ def test_cli_update_resolves_latest_before_running_installer(monkeypatch, tmp_pa
     ]
     assert "Version to install" in result.stdout
     assert "v1.2.4" in result.stdout
+
+
+def test_cli_update_warns_when_already_on_latest_version(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    bin_dir = tmp_path / "bin"
+    config_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (install_root / "VERSION").write_text("0.1.7\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr(
+        "app.cli.app._resolve_update_version",
+        lambda repo, requested_version, channel="stable": "v0.1.7",
+    )
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--install-dir",
+            str(install_root),
+            "--bin-dir",
+            str(bin_dir),
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Installed version is already the latest available for this channel" in result.stdout
+    assert called["command"]
+
+
+def test_cli_update_passes_prerelease_channel(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    bin_dir = tmp_path / "bin"
+    config_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr(
+        "app.cli.app._resolve_update_version",
+        lambda repo, requested_version, channel="stable": "v1.2.5-rc1",
+    )
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--install-dir",
+            str(install_root),
+            "--bin-dir",
+            str(bin_dir),
+            "--repo",
+            "owner/repo",
+            "--channel",
+            "prerelease",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "--channel" in called["command"]
+    assert "prerelease" in called["command"]
+    assert "Release channel: prerelease" in result.stdout
 
 
 def test_cli_update_can_install_source_ref(monkeypatch, tmp_path: Path) -> None:
@@ -378,7 +466,10 @@ def test_cli_update_prefers_existing_wrapper_install_root(monkeypatch, tmp_path:
 
     monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
     monkeypatch.setattr("app.cli.app._detect_wrapper_install_root", lambda: wrapper_root)
-    monkeypatch.setattr("app.cli.app._resolve_update_version", lambda repo, requested_version: "v1.2.4")
+    monkeypatch.setattr(
+        "app.cli.app._resolve_update_version",
+        lambda repo, requested_version, channel="stable": "v1.2.4",
+    )
 
     result = runner.invoke(
         cli_app,
@@ -442,6 +533,39 @@ def test_cli_panel_update_from_main_uses_source_ref(monkeypatch, tmp_path: Path)
     assert "--ref" in called["command"]
     assert "main" in called["command"]
     assert "Source: Git ref main" in result.stdout
+
+
+def test_cli_panel_update_can_choose_prerelease(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    config_dir.mkdir(parents=True)
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr("app.cli.app._resolve_bin_dir", lambda install_root, explicit_bin_dir=None: tmp_path / "bin")
+    monkeypatch.setattr(
+        "app.cli.app._resolve_update_version",
+        lambda repo, requested_version, channel="stable": "v1.2.5-rc1",
+    )
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="3\n1\nprerelease\ny\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "--channel" in called["command"]
+    assert "prerelease" in called["command"]
+    assert "Release channel: prerelease" in result.stdout
 
 
 def test_cli_routes_set_priority(tmp_path: Path) -> None:

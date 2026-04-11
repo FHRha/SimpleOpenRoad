@@ -78,6 +78,8 @@ Interactive terminal:
 CLI:
 
 - sor update
+- sor update --channel stable
+- sor update --channel prerelease
 - sor update --version v0.1.1
 - sor update --ref main
 

@@ -96,6 +96,12 @@ sor update
 sor update --ref main
 ```
 
+For release updates, you can choose channel `stable` or `prerelease`:
+
+```bash
+sor update --channel prerelease
+```
+
 ## Documentation
 
 - docs/ADMIN_GUIDE.md
