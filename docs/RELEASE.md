@@ -79,6 +79,7 @@ CLI:
 
 - sor update
 - sor update --version v0.1.1
+- sor update --ref main
 
 Updates preserve user-owned state:
 
@@ -89,9 +90,12 @@ Updates preserve user-owned state:
 
 The installer refreshes application files from the release archive, reinstalls the editable package in the existing virtual environment, recreates the wrapper binary if needed, and restarts/reinstalls the background service using the existing config path.
 
+By default `sor update` installs the latest GitHub Release. Use `sor update --ref main` only for testing unreleased changes from a branch/source archive.
+
 ## Notes
 
 - Installer supports Linux only.
 - Installer auto-detects architecture and downloads matching archive.
-- Default install path is ~/.local/share/simple-open-road.
+- Default install path is ~/.local/share/simple-open-road for user installs.
+- Default install path is /usr/local/share/simple-open-road for root installs.
 - Wrapper binary is created at ~/.local/bin/sor.

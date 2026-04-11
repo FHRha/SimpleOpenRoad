@@ -125,6 +125,11 @@ Update package while preserving user settings:
 sor update
 ```
 
+Test unreleased changes from the main branch:
+```bash
+sor update --ref main
+```
+
 Update to a specific release:
 ```bash
 sor update --version v0.1.1

@@ -424,6 +424,42 @@ def _run_streaming_command(command: list[str], check: bool = True) -> subprocess
     return proc
 
 
+def _read_installed_version(install_root: Path) -> str:
+    version_path = install_root / "VERSION"
+    if version_path.exists():
+        return version_path.read_text(encoding="utf-8", errors="replace").strip() or "<empty>"
+    return "<source/no VERSION file>"
+
+
+def _current_cli_file() -> Path:
+    return Path(__file__).resolve()
+
+
+def _print_install_diagnostics(config_path: str) -> None:
+    config_install_root = _guess_install_root(config_path)
+    wrapper_install_root = _detect_wrapper_install_root()
+    install_root = wrapper_install_root or config_install_root
+    sor_path = shutil.which("sor") or "<not found in PATH>"
+    table = Table(title="SimpleOpenRoad Install Diagnostics", box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Config path", str(Path(config_path).resolve()))
+    table.add_row("Config install dir", str(config_install_root))
+    table.add_row("Wrapper install dir", str(wrapper_install_root) if wrapper_install_root else "<not detected>")
+    table.add_row("Effective install dir", str(install_root))
+    table.add_row("Installed VERSION", _read_installed_version(install_root))
+    table.add_row("CLI module file", str(_current_cli_file()))
+    table.add_row("sor in PATH", sor_path)
+    table.add_row("Python executable", sys.executable)
+    console.print(table)
+
+    cli_text = _current_cli_file().read_text(encoding="utf-8", errors="replace")
+    has_alias_guide = "Model Alias Guide" in cli_text
+    has_v1_setup = "openai_base = f\"{api_base}/v1\"" in cli_text
+    console.print(f"Setup summary code has /v1 Base URL: {'yes' if has_v1_setup else 'no'}")
+    console.print(f"Setup summary code has alias guide: {'yes' if has_alias_guide else 'no'}")
+
+
 def _run_systemctl(mode: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     command = [*_systemctl_base(mode), *args]
     return _run_command(command, check=check)
@@ -435,6 +471,14 @@ def _default_bin_dir() -> Path:
         if callable(geteuid) and geteuid() == 0 and Path("/usr/local/bin").is_dir():
             return Path("/usr/local/bin")
     return Path.home() / ".local" / "bin"
+
+
+def _default_install_root() -> Path:
+    if sys.platform.startswith("linux"):
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid) and geteuid() == 0:
+            return Path("/usr/local/share/simple-open-road")
+    return Path.home() / ".local" / "share" / "simple-open-road"
 
 
 def _resolve_bin_dir(install_root: Path, explicit_bin_dir: str | None = None) -> Path:
@@ -505,6 +549,7 @@ def _build_update_command(
     bin_dir: Path,
     repo: str,
     version: str | None,
+    ref: str | None,
     arch: str | None,
     python_bin: str | None,
 ) -> list[str]:
@@ -524,6 +569,8 @@ def _build_update_command(
     ]
     if version:
         command.extend(["--version", version])
+    if ref:
+        command.extend(["--ref", ref])
     if arch:
         command.extend(["--arch", arch])
     if python_bin:
@@ -596,9 +643,55 @@ def _service_status_text(mode: str) -> str:
 
 def _guess_install_root(config_path: str) -> Path:
     cfg_path = Path(config_path).resolve()
+    if not cfg_path.exists():
+        return _default_install_root()
     if cfg_path.parent.name == "config":
         return cfg_path.parent.parent
     return cfg_path.parent
+
+
+def _install_root_from_wrapper(wrapper_path: Path) -> Path | None:
+    if not wrapper_path.exists() or not wrapper_path.is_file():
+        return None
+    try:
+        lines = wrapper_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("exec ") and "/.venv/bin/sor" in stripped:
+            value = stripped.split("/.venv/bin/sor", 1)[0].removeprefix("exec ").strip().strip('"')
+            path = Path(value)
+            if path.exists():
+                return path.resolve()
+        if stripped.startswith("cd "):
+            value = stripped.removeprefix("cd ").strip().strip('"')
+            path = Path(value)
+            if path.exists():
+                return path.resolve()
+    return None
+
+
+def _detect_wrapper_install_root() -> Path | None:
+    candidates: list[Path] = []
+    discovered = shutil.which("sor")
+    if discovered:
+        candidates.append(Path(discovered))
+    candidates.extend([Path("/usr/local/bin/sor"), Path.home() / ".local" / "bin" / "sor"])
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        install_root = _install_root_from_wrapper(resolved)
+        if install_root is not None:
+            return install_root
+    return None
 
 
 def _stop_fallback_background_process(config_path: str) -> bool:
@@ -1088,19 +1181,31 @@ def health(config_path: str = typer.Option("config/config.yaml", help="Path to c
         console.print(row)
 
 
+@cli_app.command("version")
+def version(config_path: str = typer.Option("config/config.yaml", help="Path to current config.yaml")) -> None:
+    _print_install_diagnostics(config_path=config_path)
+
+
 def _run_update(
     config_path: str,
     repo: str = "FHRha/SimpleOpenRoad",
     version: str | None = None,
+    ref: str | None = None,
     arch: str | None = None,
     python_bin: str | None = None,
     install_dir: str | None = None,
     bin_dir: str | None = None,
     yes: bool = False,
 ) -> None:
-    install_root = Path(install_dir).expanduser().resolve() if install_dir else _guess_install_root(config_path)
+    if version and ref:
+        raise typer.BadParameter("Use either --version or --ref, not both")
+
+    if install_dir:
+        install_root = Path(install_dir).expanduser().resolve()
+    else:
+        install_root = _detect_wrapper_install_root() or _guess_install_root(config_path)
     resolved_bin_dir = _resolve_bin_dir(install_root=install_root, explicit_bin_dir=bin_dir)
-    resolved_version = _resolve_update_version(repo=repo, requested_version=version)
+    resolved_version = None if ref else _resolve_update_version(repo=repo, requested_version=version)
 
     console.print(
         Panel.fit(
@@ -1109,7 +1214,7 @@ def _run_update(
                     f"Install dir: {install_root}",
                     f"Binary dir: {resolved_bin_dir}",
                     f"Repo: {repo}",
-                    f"Version to install: {resolved_version}",
+                    f"Source: Git ref {ref}" if ref else f"Version to install: {resolved_version}",
                     "Preserved: .env, config/config.yaml, data/",
                 ]
             ),
@@ -1126,6 +1231,7 @@ def _run_update(
         bin_dir=resolved_bin_dir,
         repo=repo,
         version=resolved_version,
+        ref=ref,
         arch=arch,
         python_bin=python_bin,
     )
@@ -1138,6 +1244,7 @@ def update(
     config_path: str = typer.Option("config/config.yaml", help="Path to current config.yaml"),
     repo: str = typer.Option("FHRha/SimpleOpenRoad", help="GitHub repository in owner/repo format"),
     version: str | None = typer.Option(None, help="Release tag to install; defaults to latest"),
+    ref: str | None = typer.Option(None, help="Git ref/branch to install from source instead of a release"),
     arch: str | None = typer.Option(None, help="Target archive architecture; defaults to auto-detect"),
     python_bin: str | None = typer.Option(None, "--python", help="Python binary for venv creation"),
     install_dir: str | None = typer.Option(None, help="Installed package directory"),
@@ -1148,6 +1255,7 @@ def update(
         config_path=config_path,
         repo=repo,
         version=version,
+        ref=ref,
         arch=arch,
         python_bin=python_bin,
         install_dir=install_dir,
@@ -1487,13 +1595,15 @@ def _run_service_panel(config_path: str) -> None:
             title="SimpleOpenRoad / Service",
             config_path=config_path,
             lines=[
-                "1) Update SimpleOpenRoad",
-                "2) Install system service",
-                "3) Start service",
-                "4) Stop service",
-                "5) Restart service",
-                "6) Service status",
-                "7) Show service logs",
+                "1) Update latest release",
+                "2) Update from main branch (dev/unreleased)",
+                "3) Install diagnostics",
+                "4) Install system service",
+                "5) Start service",
+                "6) Stop service",
+                "7) Restart service",
+                "8) Service status",
+                "9) Show service logs",
                 "0) Back",
             ],
         )
@@ -1503,21 +1613,27 @@ def _run_service_panel(config_path: str) -> None:
                 _run_update(config_path=config_path, yes=False)
                 _pause()
             elif choice == "2":
-                service_install(config_path=config_path, mode="system", run_as=None, start=True)
+                _run_update(config_path=config_path, ref="main", yes=False)
                 _pause()
             elif choice == "3":
-                service_start(mode="system")
+                _print_install_diagnostics(config_path=config_path)
                 _pause()
             elif choice == "4":
-                service_stop(mode="system")
+                service_install(config_path=config_path, mode="system", run_as=None, start=True)
                 _pause()
             elif choice == "5":
-                service_restart(mode="system")
+                service_start(mode="system")
                 _pause()
             elif choice == "6":
-                service_status(mode="system")
+                service_stop(mode="system")
                 _pause()
             elif choice == "7":
+                service_restart(mode="system")
+                _pause()
+            elif choice == "8":
+                service_status(mode="system")
+                _pause()
+            elif choice == "9":
                 service_logs(mode="system", lines=100)
                 _pause()
             elif choice == "0":

@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from app.config.loader import load_gateway_config
 from app.cli.app import cli_app
+from app.cli.app import _default_install_root
 from app.cli.app import _ensure_env_master_admin_keys
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
@@ -306,6 +307,143 @@ def test_cli_update_resolves_latest_before_running_installer(monkeypatch, tmp_pa
     assert "v1.2.4" in result.stdout
 
 
+def test_cli_update_can_install_source_ref(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    bin_dir = tmp_path / "bin"
+    config_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--install-dir",
+            str(install_root),
+            "--bin-dir",
+            str(bin_dir),
+            "--repo",
+            "owner/repo",
+            "--ref",
+            "main",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called["command"] == [
+        "bash",
+        str(install_root / "install.sh"),
+        "--repo",
+        "owner/repo",
+        "--install-dir",
+        str(install_root),
+        "--bin-dir",
+        str(bin_dir),
+        "--ref",
+        "main",
+    ]
+    assert "Source: Git ref main" in result.stdout
+
+
+def test_cli_update_prefers_existing_wrapper_install_root(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    wrapper_root = tmp_path / "wrapper-install"
+    config_root = tmp_path / "config-install"
+    bin_dir = tmp_path / "bin"
+    (wrapper_root / "config").mkdir(parents=True)
+    (config_root / "config").mkdir(parents=True)
+    bin_dir.mkdir()
+    (wrapper_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_root / "config" / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr("app.cli.app._detect_wrapper_install_root", lambda: wrapper_root)
+    monkeypatch.setattr("app.cli.app._resolve_update_version", lambda repo, requested_version: "v1.2.4")
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--bin-dir",
+            str(bin_dir),
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    install_dir_index = called["command"].index("--install-dir") + 1
+    assert called["command"][install_dir_index] == str(wrapper_root)
+
+
+def test_cli_version_prints_install_diagnostics(tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    config_dir.mkdir(parents=True)
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+    (install_root / "VERSION").write_text("v-test\n", encoding="utf-8")
+
+    result = runner.invoke(cli_app, ["version", "--config-path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "SimpleOpenRoad Install Diagnostics" in result.stdout
+    assert "v-test" in result.stdout
+    assert "Setup summary code has /v1 Base URL: yes" in result.stdout
+    assert "Setup summary code has alias guide: yes" in result.stdout
+
+
+def test_cli_panel_update_from_main_uses_source_ref(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    config_dir.mkdir(parents=True)
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr("app.cli.app._resolve_bin_dir", lambda install_root, explicit_bin_dir=None: tmp_path / "bin")
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="3\n2\ny\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "--ref" in called["command"]
+    assert "main" in called["command"]
+    assert "Source: Git ref main" in result.stdout
+
+
 def test_cli_routes_set_priority(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
@@ -435,6 +573,20 @@ def test_setup_summary_prints_openai_plugin_settings(monkeypatch, tmp_path: Path
 def test_service_mode_validation() -> None:
     assert _service_mode("system") == "system"
     assert _service_mode("USER") == "user"
+
+
+def test_default_install_root_for_root(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("app.cli.app.os.geteuid", lambda: 0, raising=False)
+
+    assert _default_install_root() == Path("/usr/local/share/simple-open-road")
+
+
+def test_default_install_root_for_user(monkeypatch) -> None:
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr("app.cli.app.os.geteuid", lambda: 1000, raising=False)
+
+    assert _default_install_root() == Path.home() / ".local" / "share" / "simple-open-road"
 
 
 def test_service_unit_path_resolves_user_location() -> None:

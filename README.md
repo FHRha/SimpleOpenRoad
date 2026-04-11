@@ -90,6 +90,12 @@ To update an installed server package while preserving `.env`, `config/config.ya
 sor update
 ```
 
+`sor update` installs the latest GitHub Release. To test unreleased changes from the `main` branch:
+
+```bash
+sor update --ref main
+```
+
 ## Documentation
 
 - docs/ADMIN_GUIDE.md

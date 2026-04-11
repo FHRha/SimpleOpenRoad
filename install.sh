@@ -6,14 +6,15 @@ usage() {
 SimpleOpenRoad installer
 
 Usage:
-  install.sh [--repo <owner/repo>] [--version <tag>] [--arch <x86_64|arm64>] [--python <binary>] [--install-dir <path>] [--bin-dir <path>]
+  install.sh [--repo <owner/repo>] [--version <tag>] [--ref <git-ref>] [--arch <x86_64|arm64>] [--python <binary>] [--install-dir <path>] [--bin-dir <path>]
 
 Options:
   --repo        GitHub repository in owner/repo format (default: FHRha/SimpleOpenRoad)
   --version     Release tag (default: latest release tag)
+  --ref         Install source archive from a Git ref/branch instead of a release
   --arch        Target archive architecture (default: auto-detect from uname -m)
   --python      Preferred Python binary (must be >= 3.11)
-  --install-dir Target install directory (default: ~/.local/share/simple-open-road)
+  --install-dir Target install directory (default: ~/.local/share/simple-open-road, or /usr/local/share/simple-open-road for root)
   --bin-dir     Directory for wrapper binary (default: ~/.local/bin)
   -h, --help    Show this help
 
@@ -216,6 +217,43 @@ restore_existing_state() {
   fi
 }
 
+extract_install_dir_from_wrapper() {
+  local wrapper="$1"
+  local target=""
+  if [[ ! -f "${wrapper}" ]]; then
+    return 1
+  fi
+
+  target="$(sed -n 's/^exec "\(.*\)\/\.venv\/bin\/sor" .*$/\1/p' "${wrapper}" | head -n1)"
+  if [[ -z "${target}" ]]; then
+    target="$(sed -n 's/^cd "\(.*\)"$/\1/p' "${wrapper}" | head -n1)"
+  fi
+  if [[ -n "${target}" && -d "${target}" ]]; then
+    echo "${target}"
+    return 0
+  fi
+
+  return 1
+}
+
+detect_existing_install_dir() {
+  local wrapper=""
+  local detected=""
+
+  for wrapper in "${BIN_DIR}/sor" "$(command -v sor 2>/dev/null || true)" "/usr/local/bin/sor" "${HOME}/.local/bin/sor"; do
+    if [[ -z "${wrapper}" ]]; then
+      continue
+    fi
+    detected="$(extract_install_dir_from_wrapper "${wrapper}" || true)"
+    if [[ -n "${detected}" ]]; then
+      echo "${detected}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 if [[ "${OSTYPE:-}" != linux* ]]; then
   echo "This installer currently supports Linux only." >&2
   exit 1
@@ -224,13 +262,19 @@ fi
 DEFAULT_REPO="FHRha/SimpleOpenRoad"
 REPO="${DEFAULT_REPO}"
 TAG=""
+SOURCE_REF=""
 ARCH=""
 INSTALL_DIR="${HOME}/.local/share/simple-open-road"
 BIN_DIR="${HOME}/.local/bin"
+INSTALL_DIR_EXPLICIT=0
+BIN_DIR_EXPLICIT=0
 
 # Root installs should expose CLI globally by default.
 if [[ "${EUID}" -eq 0 ]] && [[ -d "/usr/local/bin" ]] && [[ -w "/usr/local/bin" ]]; then
   BIN_DIR="/usr/local/bin"
+  if [[ -d "/usr/local/share" ]] && [[ -w "/usr/local/share" ]]; then
+    INSTALL_DIR="/usr/local/share/simple-open-road"
+  fi
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -243,6 +287,10 @@ while [[ $# -gt 0 ]]; do
       TAG="$2"
       shift 2
       ;;
+    --ref)
+      SOURCE_REF="$2"
+      shift 2
+      ;;
     --arch)
       ARCH="$2"
       shift 2
@@ -253,10 +301,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --install-dir)
       INSTALL_DIR="$2"
+      INSTALL_DIR_EXPLICIT=1
       shift 2
       ;;
     --bin-dir)
       BIN_DIR="$2"
+      BIN_DIR_EXPLICIT=1
       shift 2
       ;;
     -h|--help)
@@ -271,6 +321,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${INSTALL_DIR_EXPLICIT}" -eq 0 ]]; then
+  EXISTING_INSTALL_DIR="$(detect_existing_install_dir || true)"
+  if [[ -n "${EXISTING_INSTALL_DIR}" ]]; then
+    INSTALL_DIR="${EXISTING_INSTALL_DIR}"
+    echo "Detected existing install directory: ${INSTALL_DIR}"
+  fi
+fi
+
 if [[ -n "${ARCH}" ]]; then
   ARCH="$(normalize_arch "${ARCH}")"
 else
@@ -281,19 +339,33 @@ resolve_python_bin
 
 echo "Using Python runtime: ${PYTHON_BIN}"
 
-if [[ -z "${TAG}" ]]; then
+if [[ -n "${TAG}" && -n "${SOURCE_REF}" ]]; then
+  echo "Use either --version or --ref, not both." >&2
+  exit 1
+fi
+
+if [[ -z "${TAG}" && -z "${SOURCE_REF}" ]]; then
   TAG="$(resolve_release_tag || true)"
 fi
 
-if [[ -z "${TAG}" ]]; then
+if [[ -z "${TAG}" && -z "${SOURCE_REF}" ]]; then
   echo "Unable to resolve release tag for ${REPO}." >&2
   echo "Create or publish at least one release, or pass --version <tag>." >&2
   exit 1
 fi
 
-VERSION="${TAG#v}"
-ARCHIVE_NAME="simple-open-road-${VERSION}-linux-${ARCH}.tar.gz"
-ARCHIVE_URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE_NAME}"
+if [[ -n "${SOURCE_REF}" ]]; then
+  SAFE_REF="${SOURCE_REF//\//-}"
+  VERSION="${SAFE_REF}"
+  ARCHIVE_NAME="simple-open-road-source-${SAFE_REF}.tar.gz"
+  ARCHIVE_URL="https://github.com/${REPO}/archive/${SOURCE_REF}.tar.gz"
+  echo "Installing source ref: ${SOURCE_REF}"
+else
+  VERSION="${TAG#v}"
+  ARCHIVE_NAME="simple-open-road-${VERSION}-linux-${ARCH}.tar.gz"
+  ARCHIVE_URL="https://github.com/${REPO}/releases/download/${TAG}/${ARCHIVE_NAME}"
+  echo "Installing release: ${TAG}"
+fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -307,7 +379,11 @@ fi
 
 echo "Extracting archive"
 tar -xzf "${TMP_DIR}/${ARCHIVE_NAME}" -C "${TMP_DIR}"
-EXTRACTED_DIR="${TMP_DIR}/simple-open-road-${VERSION}-linux-${ARCH}"
+if [[ -n "${SOURCE_REF}" ]]; then
+  EXTRACTED_DIR="$(find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+else
+  EXTRACTED_DIR="${TMP_DIR}/simple-open-road-${VERSION}-linux-${ARCH}"
+fi
 
 if [[ ! -d "${EXTRACTED_DIR}" ]]; then
   echo "Archive layout is invalid: ${EXTRACTED_DIR} not found." >&2
