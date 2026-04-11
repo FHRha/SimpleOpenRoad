@@ -38,6 +38,13 @@ Add key:
 sor keys add --provider github --key-id github-backup --secret <TOKEN>
 ```
 
+`key-id` is a local identifier for logs, stats, health checks and remove/enable/disable commands. It is not sent to the provider. Use names like `openrouter-main`, `gemini-backup-1`, or `github-work`.
+
+Remove key:
+```bash
+sor keys remove --key-id github-backup
+```
+
 Disable / enable key runtime state:
 ```bash
 sor keys disable --key-id github-main
@@ -100,14 +107,16 @@ sor panel --config-path config/config.yaml
 
 In the terminal panel:
 - `0` exits the panel.
-- `2` prints the `MASTER_API_KEY` and a ready-to-run curl example.
-- `9` removes old unconfigured placeholder keys from `config.yaml`.
-- `10` updates SimpleOpenRoad while preserving `.env`, `config/config.yaml`, provider keys and `data/`.
-- `18` performs a full package uninstall.
+- Choose a section first, then use `0` inside a section to go back.
+- Gateway -> API access token and test shows `MASTER_API_KEY`, can regenerate it, and can run an automatic local test request.
+- Providers and keys -> Remove provider key deletes a configured provider key from `config.yaml`.
+- Providers and keys -> Clean unconfigured placeholder keys removes old placeholder keys from `config.yaml`.
+- Service -> Update SimpleOpenRoad preserves `.env`, `config/config.yaml`, provider keys and `data/`.
+- Maintenance -> Full uninstall package removes the installed package.
 
 The panel is grouped by area:
-- Gateway: setup summary, API token, doctor, stats.
-- Providers and keys: providers, key wizard, key list, validation, placeholder cleanup.
+- Gateway: setup summary, API token/test, doctor, stats.
+- Providers and keys: providers, key wizard, key list, validation, key removal, placeholder cleanup.
 - Service: update, install/start/stop/restart/status/logs.
 - Maintenance: service-only uninstall and full package uninstall.
 

@@ -101,6 +101,22 @@ def test_cli_panel_accepts_zero_exit() -> None:
     assert "SimpleOpenRoad Management Terminal" in result.stdout
 
 
+def test_cli_api_access_section_waits_before_back(monkeypatch) -> None:
+    runner = CliRunner()
+    called: dict[str, bool] = {}
+
+    def _fake_print_api_access(config_path: str) -> None:
+        called["printed"] = True
+
+    monkeypatch.setattr("app.cli.app._print_api_access", _fake_print_api_access)
+
+    result = runner.invoke(cli_app, ["panel"], input="1\n2\n1\n\n0\n0\n0\n")
+
+    assert result.exit_code == 0
+    assert called["printed"] is True
+    assert "Press Enter to return" in result.stdout
+
+
 def test_cli_cleanup_removes_unconfigured_placeholder_keys(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
@@ -111,13 +127,30 @@ def test_cli_cleanup_removes_unconfigured_placeholder_keys(tmp_path: Path) -> No
     )
     config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
-    result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="9\n0\n")
+    result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="2\n7\n\n0\n0\n")
 
     assert result.exit_code == 0
     assert "Removed unconfigured placeholder keys: 1" in result.stdout
     updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     ids = [item["id"] for item in updated["providers"]["github"]["keys"]]
     assert ids == ["github-main"]
+
+
+def test_cli_panel_removes_key(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="2\n6\ngithub-main\ny\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Removed key: github-main" in result.stdout
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    ids = [item["id"] for item in data["providers"]["github"]["keys"]]
+    assert "github-main" not in ids
 
 
 def test_cli_update_runs_installer_with_existing_paths(monkeypatch, tmp_path: Path) -> None:

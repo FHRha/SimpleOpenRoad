@@ -50,18 +50,20 @@ sor start --config-path config/config.yaml
 
 ## First request
 
-The installer generates `MASTER_API_KEY` in `.env`. You can view it from the terminal panel with `sor` -> `2) Show API access token and curl example`.
+The installer generates `MASTER_API_KEY` in `.env`. You can view it or run an automatic API test from the terminal panel with `sor` -> `Gateway` -> `API access token and test`.
 
 ```bash
 MASTER_API_KEY="$(grep '^MASTER_API_KEY=' .env | cut -d= -f2-)"
 
-curl -X POST http://127.0.0.1:12345/v1/chat/completions \
+curl -sS -X POST "http://127.0.0.1:12345/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -H "x-api-key: ${MASTER_API_KEY}" \
-  -d '{
+  --data-binary @- <<'JSON'
+{
     "model": "auto/fast",
     "messages": [{"role": "user", "content": "Hello"}]
-  }'
+}
+JSON
 ```
 
 To fully remove an installed server package:

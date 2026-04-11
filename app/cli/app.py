@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 import typer
 import uvicorn
 import yaml
@@ -98,6 +99,24 @@ def _load_env_file(env_path: Path = Path(".env")) -> dict[str, str]:
     return values
 
 
+def _set_env_value(key_name: str, value: str, env_path: Path = Path(".env")) -> None:
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    found = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        current_key, _ = stripped.split("=", 1)
+        if current_key.strip() == key_name:
+            lines[index] = f"{key_name}={value}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{key_name}={value}")
+    env_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    os.environ[key_name] = value
+
+
 def _container(config_path: str | None) -> AppContainer:
     return AppContainer(config_path=config_path)
 
@@ -166,11 +185,22 @@ def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     console.print(f"- Health: {api_base}/health")
 
 
-def _print_api_access(config_path: str) -> None:
+def _resolve_local_api_base_url(cfg: GatewayConfig) -> str:
+    host = str(cfg.server.host).strip().lower()
+    if host in {"", "0.0.0.0", "::", "[::]"}:
+        host = "127.0.0.1"
+    return f"http://{host}:{cfg.server.port}"
+
+
+def _current_master_api_key() -> str:
     created_env, generated_keys = _ensure_env_master_admin_keys()
     _print_env_setup_hint(created_env=created_env, generated_keys=generated_keys)
+    return os.getenv("MASTER_API_KEY") or _load_env_file().get("MASTER_API_KEY", "")
+
+
+def _print_api_access(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
-    token = os.getenv("MASTER_API_KEY") or _load_env_file().get("MASTER_API_KEY", "")
+    token = _current_master_api_key()
     api_base = _resolve_api_base_url(cfg)
 
     console.print(
@@ -181,23 +211,67 @@ def _print_api_access(config_path: str) -> None:
             box=box.ASCII,
         )
     )
-    if cfg.security.require_master_key:
-        console.print("User API protection: enabled")
-        console.print(f"MASTER_API_KEY: {token}")
-        console.print("Use either header:")
-        console.print(f"- x-api-key: {token}")
-        console.print(f"- Authorization: Bearer {token}")
-    else:
-        console.print("User API protection: disabled in config security.require_master_key")
+    table = Table(title="User API Auth")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Protection", "enabled" if cfg.security.require_master_key else "disabled")
+    table.add_row("API base", api_base)
+    table.add_row("MASTER_API_KEY", token if cfg.security.require_master_key else "<not required>")
+    table.add_row("Header", "x-api-key: <MASTER_API_KEY>")
+    table.add_row("Alt header", "Authorization: Bearer <MASTER_API_KEY>")
+    console.print(table)
+    console.print("Use Gateway -> Test API request to run an automatic local check.")
 
-    console.print("Test request:")
-    console.print(
-        "curl -X POST "
-        f"{api_base}/v1/chat/completions "
-        '-H "Content-Type: application/json" '
-        f'-H "x-api-key: {token}" '
-        "-d '{\"model\":\"auto/fast\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
-    )
+
+def _regenerate_master_api_key(restart_service: bool = False) -> str:
+    _ensure_env_master_admin_keys()
+    new_token = _generate_api_key(40)
+    _set_env_value("MASTER_API_KEY", new_token)
+    console.print("Generated new MASTER_API_KEY in .env")
+    console.print(f"MASTER_API_KEY: {new_token}")
+    console.print("A running service must be restarted before it accepts the new token.")
+    if restart_service:
+        service_restart(mode="system")
+    return new_token
+
+
+def _test_api_request(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    token = _current_master_api_key()
+    api_base = _resolve_local_api_base_url(cfg)
+    url = f"{api_base}/v1/chat/completions"
+    payload = {
+        "model": "auto/fast",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    headers = {"Content-Type": "application/json"}
+    if cfg.security.require_master_key:
+        headers["x-api-key"] = token
+
+    table = Table(title="Automatic API Test")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("URL", url)
+    table.add_row("Model", "auto/fast")
+    table.add_row("Auth", "x-api-key" if cfg.security.require_master_key else "disabled")
+    try:
+        response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+        table.add_row("HTTP status", str(response.status_code))
+        if response.status_code == 200:
+            data = response.json()
+            text = ""
+            choices = data.get("choices", []) if isinstance(data, dict) else []
+            if choices:
+                text = str(choices[0].get("message", {}).get("content", ""))
+            table.add_row("Result", "ok")
+            table.add_row("Response", text[:300] or "<empty>")
+        else:
+            table.add_row("Result", "failed")
+            table.add_row("Response", response.text[:500])
+    except Exception as exc:  # noqa: BLE001
+        table.add_row("Result", "failed")
+        table.add_row("Error", str(exc))
+    console.print(table)
 
 
 def _generate_api_key(length: int = 40) -> str:
@@ -552,6 +626,8 @@ def _interactive_add_provider_key(config_path: str) -> None:
 
     existing_keys = providers.get(provider, {}).get("keys", [])
     default_key_id = f"{provider}-key-{len(existing_keys) + 1}"
+    console.print("Key ID is a local name for this provider key. It is used in logs, stats, health checks and removal commands.")
+    console.print("It is not sent to the provider. Example: openrouter-main or gemini-backup-1.")
     key_id = typer.prompt("Key ID", default=default_key_id).strip()
     if not key_id:
         raise typer.BadParameter("Key ID cannot be empty")
@@ -1135,93 +1211,254 @@ def service_logs(
     console.print(text)
 
 
-def _run_management_panel(config_path: str) -> None:
+def _pause() -> None:
+    typer.prompt("Press Enter to return", default="", show_default=False)
+
+
+def _print_menu(title: str, lines: list[str], config_path: str) -> None:
+    console.print(
+        Panel.fit(
+            "\n".join(lines),
+            title=title,
+            subtitle=f"Config: {config_path}",
+            border_style="cyan",
+            box=box.ASCII,
+        )
+    )
+
+
+def _run_gateway_panel(config_path: str) -> None:
     while True:
-        console.print(
-            Panel.fit(
-                "\n".join(
-                    [
-                        "Gateway",
-                        "1) Setup summary (API URL)",
-                        "2) Show API access token and curl example",
-                        "3) Doctor report",
-                        "4) Show runtime stats",
-                        "",
-                        "Providers and keys",
-                        "5) List providers",
-                        "6) Add provider key (wizard)",
-                        "7) List keys",
-                        "8) Validate all keys",
-                        "9) Clean unconfigured placeholder keys",
-                        "",
-                        "Service",
-                        "10) Update SimpleOpenRoad",
-                        "11) Install system service",
-                        "12) Start service",
-                        "13) Stop service",
-                        "14) Restart service",
-                        "15) Service status",
-                        "16) Show service logs",
-                        "",
-                        "Maintenance",
-                        "17) Uninstall service only",
-                        "18) Full uninstall package",
-                        "0) Exit",
-                    ]
-                ),
-                title="SimpleOpenRoad Management Terminal",
-                subtitle=f"Config: {config_path}",
-                border_style="cyan",
-                box=box.ASCII,
-            )
+        _print_menu(
+            title="SimpleOpenRoad / Gateway",
+            config_path=config_path,
+            lines=[
+                "1) Setup summary (API URL)",
+                "2) API access token and test",
+                "3) Doctor report",
+                "4) Show runtime stats",
+                "0) Back",
+            ],
         )
         choice = typer.prompt("Select option", default="1").strip()
-
         try:
             if choice == "1":
                 cfg = load_gateway_config(config_path=config_path)
                 _print_setup_summary(config_path=config_path, cfg=cfg)
+                _pause()
             elif choice == "2":
-                _print_api_access(config_path=config_path)
+                _run_api_access_panel(config_path=config_path)
             elif choice == "3":
                 doctor(config_path=config_path)
+                _pause()
             elif choice == "4":
                 stats(config_path=config_path)
-            elif choice == "5":
-                providers_list(config_path=config_path)
-            elif choice == "6":
-                _interactive_add_provider_key(config_path=config_path)
-            elif choice == "7":
-                keys_list(config_path=config_path, all_keys=False)
-            elif choice == "8":
-                keys_validate(provider=None, key_id=None, config_path=config_path)
-            elif choice == "9":
-                removed = _remove_unconfigured_provider_keys(config_path=config_path)
-                console.print(f"Removed unconfigured placeholder keys: {removed}")
-            elif choice == "10":
-                update(config_path=config_path, yes=False)
-            elif choice == "11":
-                service_install(config_path=config_path, mode="system", run_as=None, start=True)
-            elif choice == "12":
-                service_start(mode="system")
-            elif choice == "13":
-                service_stop(mode="system")
-            elif choice == "14":
-                service_restart(mode="system")
-            elif choice == "15":
-                service_status(mode="system")
-            elif choice == "16":
-                service_logs(mode="system", lines=100)
-            elif choice == "17":
-                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
-            elif choice == "18":
-                uninstall(config_path=config_path, mode="system", full=True, yes=False)
+                _pause()
             elif choice == "0":
                 return
             else:
                 console.print("Unknown option")
+                _pause()
         except Exception as exc:  # noqa: BLE001
             console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_api_access_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / API Access",
+            config_path=config_path,
+            lines=[
+                "1) Show API access token",
+                "2) Regenerate API access token",
+                "3) Test API request automatically",
+                "0) Back",
+            ],
+        )
+        choice = typer.prompt("Select option", default="1").strip()
+        try:
+            if choice == "1":
+                _print_api_access(config_path=config_path)
+                _pause()
+            elif choice == "2":
+                restart_now = typer.confirm("Restart system service after token regeneration", default=False)
+                _regenerate_master_api_key(restart_service=restart_now)
+                _pause()
+            elif choice == "3":
+                _test_api_request(config_path=config_path)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_keys_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Providers and Keys",
+            config_path=config_path,
+            lines=[
+                "1) List providers",
+                "2) Add provider key (wizard)",
+                "3) List keys",
+                "4) List keys including placeholders",
+                "5) Validate all keys",
+                "6) Remove provider key",
+                "7) Clean unconfigured placeholder keys",
+                "0) Back",
+            ],
+        )
+        choice = typer.prompt("Select option", default="1").strip()
+        try:
+            if choice == "1":
+                providers_list(config_path=config_path)
+                _pause()
+            elif choice == "2":
+                _interactive_add_provider_key(config_path=config_path)
+                _pause()
+            elif choice == "3":
+                keys_list(config_path=config_path, all_keys=False)
+                _pause()
+            elif choice == "4":
+                keys_list(config_path=config_path, all_keys=True)
+                _pause()
+            elif choice == "5":
+                keys_validate(provider=None, key_id=None, config_path=config_path)
+                _pause()
+            elif choice == "6":
+                keys_list(config_path=config_path, all_keys=False)
+                key_id = typer.prompt("Key ID to remove").strip()
+                if not key_id:
+                    console.print("Key ID cannot be empty")
+                elif typer.confirm(f"Remove key '{key_id}' from config", default=False):
+                    keys_remove(key_id=key_id, config_path=config_path)
+                _pause()
+            elif choice == "7":
+                removed = _remove_unconfigured_provider_keys(config_path=config_path)
+                console.print(f"Removed unconfigured placeholder keys: {removed}")
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_service_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Service",
+            config_path=config_path,
+            lines=[
+                "1) Update SimpleOpenRoad",
+                "2) Install system service",
+                "3) Start service",
+                "4) Stop service",
+                "5) Restart service",
+                "6) Service status",
+                "7) Show service logs",
+                "0) Back",
+            ],
+        )
+        choice = typer.prompt("Select option", default="1").strip()
+        try:
+            if choice == "1":
+                update(config_path=config_path, yes=False)
+                _pause()
+            elif choice == "2":
+                service_install(config_path=config_path, mode="system", run_as=None, start=True)
+                _pause()
+            elif choice == "3":
+                service_start(mode="system")
+                _pause()
+            elif choice == "4":
+                service_stop(mode="system")
+                _pause()
+            elif choice == "5":
+                service_restart(mode="system")
+                _pause()
+            elif choice == "6":
+                service_status(mode="system")
+                _pause()
+            elif choice == "7":
+                service_logs(mode="system", lines=100)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_maintenance_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Maintenance",
+            config_path=config_path,
+            lines=[
+                "1) Uninstall service only",
+                "2) Full uninstall package",
+                "0) Back",
+            ],
+        )
+        choice = typer.prompt("Select option", default="1").strip()
+        try:
+            if choice == "1":
+                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
+                _pause()
+            elif choice == "2":
+                uninstall(config_path=config_path, mode="system", full=True, yes=False)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_management_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad Management Terminal",
+            config_path=config_path,
+            lines=[
+                "1) Gateway",
+                "2) Providers and keys",
+                "3) Service",
+                "4) Maintenance",
+                "0) Exit",
+            ],
+        )
+        choice = typer.prompt("Select section", default="1").strip()
+
+        if choice == "1":
+            _run_gateway_panel(config_path=config_path)
+        elif choice == "2":
+            _run_keys_panel(config_path=config_path)
+        elif choice == "3":
+            _run_service_panel(config_path=config_path)
+        elif choice == "4":
+            _run_maintenance_panel(config_path=config_path)
+        elif choice == "0":
+            return
+        else:
+            console.print("Unknown section")
+            _pause()
 
 
 @cli_app.command("panel")
