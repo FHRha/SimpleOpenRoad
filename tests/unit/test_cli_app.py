@@ -113,6 +113,106 @@ def test_cli_panel_accepts_zero_exit() -> None:
     assert "SimpleOpenRoad Management Terminal" in result.stdout
 
 
+def test_cli_settings_section_updates_tool_capabilities(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="1\n10\n2\n2\ncustomtools\n\n3\n1\n\n0\n3\n2\nflash-lite\n\n3\n1\n\n0\n0\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "customtools" in data["model_capabilities"]["tool_capable"]
+    assert "codex" not in data["model_capabilities"]["tool_capable"]
+    assert "flash-lite" in data["model_capabilities"]["tool_disabled"]
+    assert "gemini-2.5-flash" not in data["model_capabilities"]["tool_disabled"]
+
+
+def test_cli_settings_alias_editor_adds_candidate_by_numbers(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="1\n11\n2\n1\n2\n2\ngpt-5.4-mini\n1\n\n0\n0\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    first = data["routes"]["aliases"]["auto/fast"]["candidates"][0]
+    assert first["provider"] == "openrouter"
+    assert first["model"] == "gpt-5.4-mini"
+
+
+def test_cli_settings_alias_editor_updates_strategy_and_selection(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="1\n11\n3\n1\n2\n\n4\n1\n2\n\n0\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    alias_cfg = data["routes"]["aliases"]["auto/fast"]
+    assert alias_cfg["strategy"] == "least_errors"
+    assert alias_cfg["selection"] == "adaptive"
+
+
+def test_cli_settings_provider_editor_updates_provider_values(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="1\n12\n2\n2\n55\n\n3\n2\n88\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data["providers"]["openrouter"]["priority"] == 55
+    assert data["providers"]["openrouter"]["timeout_seconds"] == 88
+
+
+def test_cli_keys_panel_updates_key_values(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="3\n6\n2\n1\n4\n90\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    key_cfg = data["providers"]["openrouter"]["keys"][0]
+    assert key_cfg["cooldown"]["rate_limit_seconds"] == 90
+
+
+def test_cli_keys_panel_can_toggle_rename_and_remove_key(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="3\n8\n2\n1\n\n9\n2\n1\nopenrouter-renamed\n\n10\n2\n1\ny\n\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    openrouter_keys = data["providers"]["openrouter"]["keys"]
+    assert openrouter_keys == []
+
+
 def test_cli_api_access_section_waits_before_back(monkeypatch) -> None:
     runner = CliRunner()
     called: dict[str, bool] = {}
@@ -122,7 +222,7 @@ def test_cli_api_access_section_waits_before_back(monkeypatch) -> None:
 
     monkeypatch.setattr("app.cli.app._print_api_access", _fake_print_api_access)
 
-    result = runner.invoke(cli_app, ["panel"], input="1\n2\n1\n\n0\n0\n0\n")
+    result = runner.invoke(cli_app, ["panel"], input="2\n2\n1\n\n0\n0\n0\n")
 
     assert result.exit_code == 0
     assert called["printed"] is True
@@ -146,7 +246,7 @@ def test_cli_panel_exits_after_full_uninstall(monkeypatch) -> None:
 
     monkeypatch.setattr("app.cli.app.uninstall", _fake_uninstall)
 
-    result = runner.invoke(cli_app, ["panel"], input="4\n2\n")
+    result = runner.invoke(cli_app, ["panel"], input="5\n2\n")
 
     assert result.exit_code == 0
     assert called == {"full": True, "yes": False}
@@ -162,7 +262,7 @@ def test_cli_cleanup_removes_unconfigured_placeholder_keys(tmp_path: Path) -> No
     )
     config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
-    result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="2\n7\n\n0\n0\n")
+    result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="3\n7\n\n0\n0\n")
 
     assert result.exit_code == 0
     assert "Removed unconfigured placeholder keys: 1" in result.stdout
@@ -178,7 +278,7 @@ def test_cli_panel_removes_key(tmp_path: Path) -> None:
     result = runner.invoke(
         cli_app,
         ["panel", "--config-path", str(config_path)],
-        input="2\n6\ngithub-main\ny\n\n0\n0\n",
+        input="3\n10\n1\n1\ny\n\n0\n",
     )
 
     assert result.exit_code == 0
@@ -271,7 +371,7 @@ def test_cli_panel_update_uses_plain_defaults(monkeypatch, tmp_path: Path) -> No
     result = runner.invoke(
         cli_app,
         ["panel", "--config-path", str(config_path)],
-        input="3\n1\nstable\ny\n\n0\n0\n",
+        input="4\n1\nstable\ny\n\n0\n0\n",
     )
 
     assert result.exit_code == 0
@@ -559,7 +659,7 @@ def test_cli_panel_update_from_main_uses_source_ref(monkeypatch, tmp_path: Path)
     result = runner.invoke(
         cli_app,
         ["panel", "--config-path", str(config_path)],
-        input="3\n2\ny\n\n0\n0\n",
+        input="4\n2\ny\n\n0\n0\n",
     )
 
     assert result.exit_code == 0
@@ -592,7 +692,7 @@ def test_cli_panel_update_can_choose_prerelease(monkeypatch, tmp_path: Path) -> 
     result = runner.invoke(
         cli_app,
         ["panel", "--config-path", str(config_path)],
-        input="3\n1\nprerelease\ny\n\n0\n0\n",
+        input="4\n1\nprerelease\ny\n\n0\n0\n",
     )
 
     assert result.exit_code == 0

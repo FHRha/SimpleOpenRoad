@@ -1,5 +1,6 @@
 from app.config.models import GatewayConfig
-from app.core.types import ChatMessage, UnifiedLLMRequest
+from app.core.types import ChatMessage, RouteCandidate, UnifiedLLMRequest
+from app.router.model_capabilities import candidate_supports_tools
 from app.router.model_planner import classify_request_profile, plan_candidates
 
 
@@ -116,3 +117,58 @@ def test_adaptive_planner_prefers_tool_capable_candidate_for_tool_request() -> N
     assert alias == "auto/smart"
     assert candidates[0].provider == "openrouter"
     assert candidates[0].model == "openai/gpt-5.3-codex"
+
+
+def test_adaptive_planner_avoids_gemini_pro_for_gemini_only_tool_request() -> None:
+    cfg = GatewayConfig.model_validate(
+        {
+            "providers": {
+                "gemini": {
+                    "enabled": True,
+                    "priority": 10,
+                    "endpoint": "https://example.invalid",
+                    "keys": [{"id": "gemini-main", "key": "k"}],
+                }
+            },
+            "routes": {
+                "aliases": {
+                    "auto/smart": {
+                        "strategy": "strict_priority",
+                        "selection": "adaptive",
+                        "candidates": [
+                            {"provider": "gemini", "model": "gemini-2.5-flash"},
+                            {"provider": "gemini", "model": "gemini-3.1-flash-lite-preview"},
+                            {"provider": "gemini", "model": "gemini-3-flash-preview"},
+                            {"provider": "gemini", "model": "gemini-3.1-pro-preview"},
+                        ],
+                    }
+                }
+            },
+        }
+    )
+    request = UnifiedLLMRequest(
+        model="auto/smart",
+        messages=[ChatMessage(role="user", content="hello")],
+        extra_body={
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "read_file", "parameters": {"type": "object", "properties": {}}},
+                }
+            ]
+        },
+    )
+
+    candidates, alias = plan_candidates(cfg, request)
+
+    assert alias == "auto/smart"
+    assert candidates[0].provider == "gemini"
+    assert candidates[0].model in {"gemini-2.5-flash", "gemini-3.1-flash-lite-preview"}
+
+
+def test_model_capabilities_are_centralized_not_provider_special_cased() -> None:
+    cfg = GatewayConfig()
+    assert candidate_supports_tools(cfg, RouteCandidate(provider="openrouter", model="openai/gpt-5.3-codex")) is True
+    assert candidate_supports_tools(cfg, RouteCandidate(provider="github", model="gpt-4.1-mini")) is True
+    assert candidate_supports_tools(cfg, RouteCandidate(provider="gemini", model="gemini-2.5-flash")) is False
+    assert candidate_supports_tools(cfg, RouteCandidate(provider="openrouter", model="anthropic/claude-haiku-4.5")) is False

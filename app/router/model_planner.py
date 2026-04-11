@@ -7,6 +7,7 @@ from typing import Any, Literal
 from app.config.models import GatewayConfig
 from app.core.types import RouteCandidate, UnifiedLLMRequest, stringify_content
 from app.router.alias_resolver import resolve_candidates
+from app.router.model_capabilities import candidate_supports_tools
 
 TaskProfile = Literal["fast", "balanced", "strong", "code"]
 
@@ -67,28 +68,6 @@ def _request_uses_tools(request: UnifiedLLMRequest) -> bool:
     return any(message.role in {"tool", "function"} or bool(message.tool_calls) for message in request.messages)
 
 
-def _candidate_supports_tools(candidate: RouteCandidate) -> bool:
-    model = candidate.model.lower()
-    provider = candidate.provider.lower()
-    if provider == "gemini":
-        return "customtools" in model
-    return any(
-        marker in model
-        for marker in (
-            "codex",
-            "coder",
-            "grok-code",
-            "customtools",
-            "kimi-k2.5",
-            "gpt-5.",
-            "gpt-4.1",
-            "gpt-4o",
-            "claude",
-            "qwen",
-        )
-    )
-
-
 def estimate_request_tokens(request: UnifiedLLMRequest) -> int:
     text_parts = [stringify_content(message.content) for message in request.messages]
     text_parts.append(_stringify_input(request.input))
@@ -141,14 +120,18 @@ def classify_candidate_profile(candidate: RouteCandidate) -> TaskProfile:
     return "balanced"
 
 
-def _rank_adaptive_candidates(candidates: list[RouteCandidate], profile: TaskProfile) -> list[RouteCandidate]:
-    tool_capable = [candidate for candidate in candidates if _candidate_supports_tools(candidate)]
+def _rank_adaptive_candidates(
+    config: GatewayConfig,
+    candidates: list[RouteCandidate],
+    profile: TaskProfile,
+) -> list[RouteCandidate]:
+    tool_capable = [candidate for candidate in candidates if candidate_supports_tools(config, candidate)]
     if profile == "code" and tool_capable:
         candidates = tool_capable
     return sorted(
         candidates,
         key=lambda candidate: (
-            0 if profile != "code" else int(not _candidate_supports_tools(candidate)),
+            0 if profile != "code" else int(not candidate_supports_tools(config, candidate)),
             -PROFILE_SCORE[profile][classify_candidate_profile(candidate)],
         ),
     )
@@ -163,4 +146,12 @@ def plan_candidates(config: GatewayConfig, request: UnifiedLLMRequest) -> tuple[
     if alias_config is None or alias_config.selection != "adaptive":
         return candidates, alias
 
-    return _rank_adaptive_candidates(candidates, classify_request_profile(request)), alias
+    profile = classify_request_profile(request)
+    if profile == "code" and _request_uses_tools(request):
+        tool_capable = [candidate for candidate in candidates if candidate_supports_tools(config, candidate)]
+        if tool_capable:
+            candidates = tool_capable
+        elif candidates:
+            profile = "fast"
+
+    return _rank_adaptive_candidates(config, candidates, profile), alias

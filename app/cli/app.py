@@ -21,6 +21,7 @@ import httpx
 import typer
 import uvicorn
 import yaml
+from click.exceptions import Abort
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
@@ -55,6 +56,14 @@ cli_app.add_typer(service_app, name="service")
 console = Console()
 
 SERVICE_NAME = "sor"
+_ROUTE_STRATEGY_OPTIONS = [
+    "strict_priority",
+    "least_errors",
+    "weighted_round_robin",
+    "random_by_weight",
+    "least_recently_used",
+]
+_ALIAS_SELECTION_OPTIONS = ["ordered", "adaptive"]
 _PLACEHOLDER_ENV_VALUES = {
     "change-me-master-key",
     "change-me-admin-key",
@@ -84,6 +93,86 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _save_yaml(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=False), encoding="utf-8")
+
+
+def _nested_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    current: Any = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(key, default)
+    return current
+
+
+def _nested_set(data: dict[str, Any], value: Any, *keys: str) -> None:
+    current = data
+    for key in keys[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            current[key] = child
+        current = child
+    current[keys[-1]] = value
+
+
+def _parse_pattern_list(raw: str) -> list[str]:
+    items = [item.strip() for item in raw.split(",")]
+    return [item for item in items if item]
+
+
+def _update_config_value(config_path: str, value: Any, *keys: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    _nested_set(data, value, *keys)
+    _save_yaml(path, data)
+
+
+def _show_settings_summary(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    table = Table(title="SimpleOpenRoad Settings", box=box.ASCII)
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row("server.host", str(cfg.server.host))
+    table.add_row("server.port", str(cfg.server.port))
+    table.add_row("server.request_timeout_seconds", str(cfg.server.request_timeout_seconds))
+    table.add_row("server.stream_timeout_seconds", str(cfg.server.stream_timeout_seconds))
+    table.add_row("routing.retry.max_attempts_per_candidate", str(cfg.routing.retry.max_attempts_per_candidate))
+    table.add_row("health.startup_check", str(cfg.health.startup_check))
+    table.add_row("health.check_interval_seconds", str(cfg.health.check_interval_seconds))
+    table.add_row("observability.request_log", str(cfg.observability.request_log))
+    table.add_row("observability.router_decision_log", str(cfg.observability.router_decision_log))
+    table.add_row("model_capabilities.tool_capable", ", ".join(cfg.model_capabilities.tool_capable) or "<empty>")
+    table.add_row("model_capabilities.tool_disabled", ", ".join(cfg.model_capabilities.tool_disabled) or "<empty>")
+    console.print(table)
+
+
+def _print_numbered_items(title: str, items: list[str], empty_label: str = "<empty>") -> None:
+    table = Table(title=title, box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Value")
+    if not items:
+        table.add_row("-", empty_label)
+    else:
+        for index, item in enumerate(items, start=1):
+            table.add_row(str(index), item)
+    console.print(table)
+
+
+def _prompt_numbered_choice(count: int, prompt: str, allow_zero: bool = False) -> int:
+    default = "0" if allow_zero else "1"
+    value = int(typer.prompt(prompt, default=default).strip())
+    if allow_zero and value == 0:
+        return 0
+    if value < 1 or value > count:
+        raise typer.BadParameter(f"Choose a number between 1 and {count}")
+    return value
+
+
+def _prompt_menu_choice(prompt: str = "Select option", default: str = "1") -> str:
+    try:
+        return typer.prompt(prompt, default=default).strip()
+    except Abort:
+        return "0"
 
 
 def _load_env_file(env_path: Path = Path(".env")) -> dict[str, str]:
@@ -1520,6 +1609,581 @@ def _print_menu(title: str, lines: list[str], config_path: str) -> None:
     )
 
 
+def _run_capabilities_panel(config_path: str) -> None:
+    def _edit_patterns(key_name: str, title: str) -> None:
+        while True:
+            cfg = load_gateway_config(config_path=config_path)
+            values = list(getattr(cfg.model_capabilities, key_name))
+            _print_menu(
+                title=title,
+                config_path=config_path,
+                lines=[
+                    "1) Show patterns",
+                    "2) Add pattern",
+                    "3) Remove pattern by number",
+                    "0) Back",
+                ],
+            )
+            sub_choice = _prompt_menu_choice()
+            if sub_choice == "1":
+                _print_numbered_items(title, values)
+                _pause()
+            elif sub_choice == "2":
+                value = typer.prompt("Pattern").strip()
+                if not value:
+                    console.print("Pattern cannot be empty")
+                elif value in values:
+                    console.print("Pattern already exists")
+                else:
+                    values.append(value)
+                    _update_config_value(config_path, values, "model_capabilities", key_name)
+                    console.print(f"Added {key_name} pattern: {value}")
+                _pause()
+            elif sub_choice == "3":
+                if not values:
+                    console.print("No patterns to remove")
+                    _pause()
+                    continue
+                _print_numbered_items(title, values)
+                selected = _prompt_numbered_choice(len(values), "Pattern number to remove")
+                removed = values.pop(selected - 1)
+                _update_config_value(config_path, values, "model_capabilities", key_name)
+                console.print(f"Removed {key_name} pattern: {removed}")
+                _pause()
+            elif sub_choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Settings / Model Capabilities",
+            config_path=config_path,
+            lines=[
+                "1) Show capability settings",
+                "2) Edit tool_capable patterns",
+                "3) Edit tool_disabled patterns",
+                "4) Reset capability patterns to defaults",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _show_settings_summary(config_path)
+                _pause()
+            elif choice == "2":
+                _edit_patterns("tool_capable", "tool_capable patterns")
+            elif choice == "3":
+                _edit_patterns("tool_disabled", "tool_disabled patterns")
+            elif choice == "4":
+                defaults = GatewayConfig().model_capabilities
+                _update_config_value(
+                    config_path,
+                    defaults.model_dump(),
+                    "model_capabilities",
+                )
+                console.print("Reset model_capabilities to defaults")
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _select_alias_name(config_path: str) -> str | None:
+    cfg = load_gateway_config(config_path=config_path)
+    aliases = list(cfg.routes.aliases)
+    if not aliases:
+        console.print("No aliases configured")
+        return None
+    _print_numbered_items("Route Aliases", aliases)
+    selected = _prompt_numbered_choice(len(aliases), "Alias number")
+    return aliases[selected - 1]
+
+
+def _show_alias_candidates(config_path: str, alias_name: str) -> list[dict[str, str]]:
+    data = _load_yaml(_config_path(config_path))
+    rows = _nested_get(data, "routes", "aliases", alias_name, "candidates", default=[])
+    candidates = [item for item in rows if isinstance(item, dict)]
+    table = Table(title=f"Alias Chain: {alias_name}", box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Provider")
+    table.add_column("Model")
+    if not candidates:
+        table.add_row("-", "<empty>", "<empty>")
+    else:
+        for index, item in enumerate(candidates, start=1):
+            table.add_row(str(index), str(item.get("provider", "")), str(item.get("model", "")))
+    console.print(table)
+    return candidates
+
+
+def _select_provider_name(config_path: str) -> str:
+    cfg = load_gateway_config(config_path=config_path)
+    provider_names = list(cfg.providers)
+    if not provider_names:
+        raise typer.BadParameter("No providers configured")
+    _print_numbered_items("Providers", provider_names)
+    selected = _prompt_numbered_choice(len(provider_names), "Provider number")
+    return provider_names[selected - 1]
+
+
+def _select_option_from_list(title: str, options: list[str], prompt: str) -> str:
+    _print_numbered_items(title, options)
+    selected = _prompt_numbered_choice(len(options), prompt)
+    return options[selected - 1]
+
+
+def _show_provider_summary(config_path: str, provider_name: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    provider = cfg.providers[provider_name]
+    table = Table(title=f"Provider Settings: {provider_name}", box=box.ASCII)
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row("enabled", str(provider.enabled))
+    table.add_row("priority", str(provider.priority))
+    table.add_row("timeout_seconds", str(provider.timeout_seconds))
+    table.add_row("keys", str(len(provider.keys)))
+    console.print(table)
+
+
+def _select_provider_key(config_path: str, provider_name: str) -> tuple[int, dict[str, Any]] | tuple[None, None]:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    keys = _nested_get(data, "providers", provider_name, "keys", default=[])
+    key_rows = [item for item in keys if isinstance(item, dict)]
+    if not key_rows:
+        console.print("No keys configured for this provider")
+        return None, None
+    labels = [f"{item.get('id', '<no-id>')} | priority={item.get('priority', 100)}" for item in key_rows]
+    _print_numbered_items(f"Provider Keys: {provider_name}", labels)
+    selected = _prompt_numbered_choice(len(key_rows), "Key number")
+    return selected - 1, key_rows[selected - 1]
+
+
+def _update_provider_key(config_path: str, provider_name: str, key_index: int, key_data: dict[str, Any]) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    keys = _nested_get(data, "providers", provider_name, "keys", default=[])
+    if not isinstance(keys, list) or key_index < 0 or key_index >= len(keys):
+        raise typer.BadParameter("Key index is out of range")
+    keys[key_index] = key_data
+    _nested_set(data, keys, "providers", provider_name, "keys")
+    _save_yaml(path, data)
+
+
+def _select_provider_and_key(config_path: str) -> tuple[str | None, int | None, dict[str, Any] | None]:
+    provider_name = _select_provider_name(config_path)
+    key_index, key_data = _select_provider_key(config_path, provider_name)
+    return provider_name, key_index, key_data
+
+
+def _run_provider_key_settings_panel(config_path: str, provider_name: str) -> None:
+    try:
+        key_index, key_data = _select_provider_key(config_path, provider_name)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"Operation failed: {exc}")
+        _pause()
+        return
+    if key_data is None:
+        _pause()
+        return
+
+    key_id = str(key_data.get("id", "<no-id>"))
+    while True:
+        _print_menu(
+            title=f"SimpleOpenRoad / Settings / Provider Key / {provider_name} / {key_id}",
+            config_path=config_path,
+            lines=[
+                "1) Set key priority",
+                "2) Set key max_retries",
+                "3) Set key max_consecutive_errors",
+                "4) Set key rate_limit cooldown",
+                "5) Set key error cooldown",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                value = int(typer.prompt("Key priority", default=str(key_data.get("priority", 100))).strip())
+                key_data["priority"] = value
+                label = "priority"
+            elif choice == "2":
+                value = int(typer.prompt("Key max_retries", default=str(key_data.get("max_retries", 1))).strip())
+                key_data["max_retries"] = value
+                label = "max_retries"
+            elif choice == "3":
+                value = int(
+                    typer.prompt(
+                        "Key max_consecutive_errors",
+                        default=str(key_data.get("max_consecutive_errors", 5)),
+                    ).strip()
+                )
+                key_data["max_consecutive_errors"] = value
+                label = "max_consecutive_errors"
+            elif choice == "4":
+                cooldown = key_data.setdefault("cooldown", {})
+                value = int(
+                    typer.prompt(
+                        "Key cooldown.rate_limit_seconds",
+                        default=str(cooldown.get("rate_limit_seconds", 30)),
+                    ).strip()
+                )
+                cooldown["rate_limit_seconds"] = value
+                label = "cooldown.rate_limit_seconds"
+            elif choice == "5":
+                cooldown = key_data.setdefault("cooldown", {})
+                value = int(
+                    typer.prompt(
+                        "Key cooldown.error_seconds",
+                        default=str(cooldown.get("error_seconds", 15)),
+                    ).strip()
+                )
+                cooldown["error_seconds"] = value
+                label = "cooldown.error_seconds"
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+                continue
+            _update_provider_key(config_path, provider_name, key_index, key_data)
+            console.print(f"Updated key {key_data.get('id')}: {label}={value}")
+            _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_provider_settings_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Settings / Providers",
+            config_path=config_path,
+            lines=[
+                "1) Show provider settings",
+                "2) Set provider priority",
+                "3) Set provider timeout",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                provider_name = _select_provider_name(config_path)
+                _show_provider_summary(config_path, provider_name)
+                _pause()
+            elif choice == "2":
+                provider_name = _select_provider_name(config_path)
+                cfg = load_gateway_config(config_path=config_path)
+                value = int(typer.prompt("Provider priority", default=str(cfg.providers[provider_name].priority)).strip())
+                _update_config_value(config_path, value, "providers", provider_name, "priority")
+                console.print(f"Updated provider {provider_name}: priority={value}")
+                _pause()
+            elif choice == "3":
+                provider_name = _select_provider_name(config_path)
+                cfg = load_gateway_config(config_path=config_path)
+                value = int(
+                    typer.prompt("Provider timeout_seconds", default=str(cfg.providers[provider_name].timeout_seconds)).strip()
+                )
+                _update_config_value(config_path, value, "providers", provider_name, "timeout_seconds")
+                console.print(f"Updated provider {provider_name}: timeout_seconds={value}")
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _remove_provider_key_by_number(config_path: str) -> None:
+    provider_name, key_index, key_data = _select_provider_and_key(config_path)
+    if key_data is None or key_index is None or provider_name is None:
+        console.print("No key selected")
+        return
+    if not typer.confirm(f"Remove key '{key_data.get('id')}' from config", default=False):
+        console.print("Removal cancelled")
+        return
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    keys = _nested_get(data, "providers", provider_name, "keys", default=[])
+    if not isinstance(keys, list) or key_index < 0 or key_index >= len(keys):
+        raise typer.BadParameter("Key index is out of range")
+    keys.pop(key_index)
+    _nested_set(data, keys, "providers", provider_name, "keys")
+    _save_yaml(path, data)
+    console.print(f"Removed key: {key_data.get('id')}")
+
+
+def _toggle_provider_key_active(config_path: str) -> None:
+    provider_name, key_index, key_data = _select_provider_and_key(config_path)
+    if key_data is None or key_index is None or provider_name is None:
+        console.print("No key selected")
+        return
+    current = bool(key_data.get("active", True))
+    key_data["active"] = not current
+    _update_provider_key(config_path, provider_name, key_index, key_data)
+    console.print(f"Updated key {key_data.get('id')}: active={key_data['active']}")
+
+
+def _rename_provider_key_id(config_path: str) -> None:
+    provider_name, key_index, key_data = _select_provider_and_key(config_path)
+    if key_data is None or key_index is None or provider_name is None:
+        console.print("No key selected")
+        return
+    current_id = str(key_data.get("id", ""))
+    new_id = typer.prompt("New key ID", default=current_id).strip()
+    if not new_id:
+        raise typer.BadParameter("Key ID cannot be empty")
+    cfg = load_gateway_config(config_path=config_path)
+    existing_ids = {key.id for provider in cfg.providers.values() for key in provider.keys}
+    if new_id != current_id and new_id in existing_ids:
+        raise typer.BadParameter(f"Key ID already exists: {new_id}")
+    key_data["id"] = new_id
+    _update_provider_key(config_path, provider_name, key_index, key_data)
+    console.print(f"Renamed key: {current_id} -> {new_id}")
+
+
+def _add_alias_candidate(config_path: str, alias_name: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    candidates = _nested_get(data, "routes", "aliases", alias_name, "candidates", default=[])
+    if not isinstance(candidates, list):
+        candidates = []
+    provider_name = _select_provider_name(config_path)
+    model_name = typer.prompt("Model id").strip()
+    if not model_name:
+        raise typer.BadParameter("Model id cannot be empty")
+    position = int(typer.prompt("Insert position", default=str(len(candidates) + 1)).strip())
+    position = max(1, min(len(candidates) + 1, position))
+    candidates.insert(position - 1, {"provider": provider_name, "model": model_name})
+    _nested_set(data, candidates, "routes", "aliases", alias_name, "candidates")
+    _save_yaml(path, data)
+    console.print(f"Added candidate to {alias_name}: {provider_name}/{model_name}")
+
+
+def _remove_alias_candidate(config_path: str, alias_name: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    candidates = _show_alias_candidates(config_path, alias_name)
+    if not candidates:
+        console.print("No candidates to remove")
+        return
+    selected = _prompt_numbered_choice(len(candidates), "Candidate number to remove")
+    removed = candidates.pop(selected - 1)
+    _nested_set(data, candidates, "routes", "aliases", alias_name, "candidates")
+    _save_yaml(path, data)
+    console.print(f"Removed candidate: {removed.get('provider')}/{removed.get('model')}")
+
+
+def _move_alias_candidate(config_path: str, alias_name: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    candidates = _show_alias_candidates(config_path, alias_name)
+    if len(candidates) < 2:
+        console.print("Need at least two candidates to reorder")
+        return
+    selected = _prompt_numbered_choice(len(candidates), "Candidate number to move")
+    target = _prompt_numbered_choice(len(candidates), "New position")
+    item = candidates.pop(selected - 1)
+    candidates.insert(target - 1, item)
+    _nested_set(data, candidates, "routes", "aliases", alias_name, "candidates")
+    _save_yaml(path, data)
+    console.print(f"Moved candidate to position {target}: {item.get('provider')}/{item.get('model')}")
+
+
+def _run_alias_chain_editor(config_path: str, alias_name: str) -> None:
+    while True:
+        _print_menu(
+            title=f"SimpleOpenRoad / Settings / Alias Chain / {alias_name}",
+            config_path=config_path,
+            lines=[
+                "1) Show chain",
+                "2) Add candidate",
+                "3) Remove candidate by number",
+                "4) Move candidate by number",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _show_alias_candidates(config_path, alias_name)
+                _pause()
+            elif choice == "2":
+                _add_alias_candidate(config_path, alias_name)
+                _pause()
+            elif choice == "3":
+                _remove_alias_candidate(config_path, alias_name)
+                _pause()
+            elif choice == "4":
+                _move_alias_candidate(config_path, alias_name)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_alias_settings_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Settings / Alias Chains",
+            config_path=config_path,
+            lines=[
+                "1) Show aliases",
+                "2) Edit alias chain by number",
+                "3) Set alias strategy",
+                "4) Set alias selection mode",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                alias_name = _select_alias_name(config_path)
+                if alias_name is not None:
+                    _show_alias_candidates(config_path, alias_name)
+                _pause()
+            elif choice == "2":
+                alias_name = _select_alias_name(config_path)
+                if alias_name is not None:
+                    _run_alias_chain_editor(config_path, alias_name)
+            elif choice == "3":
+                alias_name = _select_alias_name(config_path)
+                if alias_name is not None:
+                    value = _select_option_from_list("Route Strategies", _ROUTE_STRATEGY_OPTIONS, "Strategy number")
+                    _update_config_value(config_path, value, "routes", "aliases", alias_name, "strategy")
+                    console.print(f"Updated alias {alias_name}: strategy={value}")
+                    _pause()
+            elif choice == "4":
+                alias_name = _select_alias_name(config_path)
+                if alias_name is not None:
+                    value = _select_option_from_list("Alias Selection Modes", _ALIAS_SELECTION_OPTIONS, "Selection number")
+                    _update_config_value(config_path, value, "routes", "aliases", alias_name, "selection")
+                    console.print(f"Updated alias {alias_name}: selection={value}")
+                    _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_settings_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Settings",
+            config_path=config_path,
+            lines=[
+                "1) Show current settings",
+                "2) Set server host",
+                "3) Set server port",
+                "4) Set request timeout",
+                "5) Set stream timeout",
+                "6) Set max attempts per candidate",
+                "7) Toggle startup health check",
+                "8) Toggle request logging",
+                "9) Toggle router decision logging",
+                "10) Model capability settings",
+                "11) Alias chain settings",
+                "12) Provider settings",
+                "13) Reload config in running app",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _show_settings_summary(config_path)
+                _pause()
+            elif choice == "2":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt("server.host", default=str(cfg.server.host)).strip()
+                _update_config_value(config_path, value, "server", "host")
+                console.print(f"Updated server.host: {value}")
+                _pause()
+            elif choice == "3":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt("server.port", default=str(cfg.server.port)).strip()
+                _update_config_value(config_path, int(value), "server", "port")
+                console.print(f"Updated server.port: {value}")
+                _pause()
+            elif choice == "4":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt("server.request_timeout_seconds", default=str(cfg.server.request_timeout_seconds)).strip()
+                _update_config_value(config_path, int(value), "server", "request_timeout_seconds")
+                console.print(f"Updated server.request_timeout_seconds: {value}")
+                _pause()
+            elif choice == "5":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt("server.stream_timeout_seconds", default=str(cfg.server.stream_timeout_seconds)).strip()
+                _update_config_value(config_path, int(value), "server", "stream_timeout_seconds")
+                console.print(f"Updated server.stream_timeout_seconds: {value}")
+                _pause()
+            elif choice == "6":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt(
+                    "routing.retry.max_attempts_per_candidate",
+                    default=str(cfg.routing.retry.max_attempts_per_candidate),
+                ).strip()
+                _update_config_value(config_path, int(value), "routing", "retry", "max_attempts_per_candidate")
+                console.print(f"Updated routing.retry.max_attempts_per_candidate: {value}")
+                _pause()
+            elif choice == "7":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.confirm("Enable startup health check", default=cfg.health.startup_check)
+                _update_config_value(config_path, value, "health", "startup_check")
+                console.print(f"Updated health.startup_check: {value}")
+                _pause()
+            elif choice == "8":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.confirm("Enable request logging", default=cfg.observability.request_log)
+                _update_config_value(config_path, value, "observability", "request_log")
+                console.print(f"Updated observability.request_log: {value}")
+                _pause()
+            elif choice == "9":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.confirm("Enable router decision logging", default=cfg.observability.router_decision_log)
+                _update_config_value(config_path, value, "observability", "router_decision_log")
+                console.print(f"Updated observability.router_decision_log: {value}")
+                _pause()
+            elif choice == "10":
+                _run_capabilities_panel(config_path=config_path)
+            elif choice == "11":
+                _run_alias_settings_panel(config_path=config_path)
+            elif choice == "12":
+                _run_provider_settings_panel(config_path=config_path)
+            elif choice == "13":
+                config_reload(config_path=config_path)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
 def _run_gateway_panel(config_path: str) -> None:
     while True:
         _print_menu(
@@ -1533,7 +2197,7 @@ def _run_gateway_panel(config_path: str) -> None:
                 "0) Back",
             ],
         )
-        choice = typer.prompt("Select option", default="1").strip()
+        choice = _prompt_menu_choice()
         try:
             if choice == "1":
                 cfg = load_gateway_config(config_path=config_path)
@@ -1569,7 +2233,7 @@ def _run_api_access_panel(config_path: str) -> None:
                 "0) Back",
             ],
         )
-        choice = typer.prompt("Select option", default="1").strip()
+        choice = _prompt_menu_choice()
         try:
             if choice == "1":
                 _print_api_access(config_path=config_path)
@@ -1602,12 +2266,15 @@ def _run_keys_panel(config_path: str) -> None:
                 "3) List keys",
                 "4) List keys including placeholders",
                 "5) Validate all keys",
-                "6) Remove provider key",
+                "6) Edit key settings",
                 "7) Clean unconfigured placeholder keys",
+                "8) Toggle key active",
+                "9) Rename key ID",
+                "10) Remove provider key",
                 "0) Back",
             ],
         )
-        choice = typer.prompt("Select option", default="1").strip()
+        choice = _prompt_menu_choice()
         try:
             if choice == "1":
                 providers_list(config_path=config_path)
@@ -1625,16 +2292,21 @@ def _run_keys_panel(config_path: str) -> None:
                 keys_validate(provider=None, key_id=None, config_path=config_path)
                 _pause()
             elif choice == "6":
-                keys_list(config_path=config_path, all_keys=False)
-                key_id = typer.prompt("Key ID to remove").strip()
-                if not key_id:
-                    console.print("Key ID cannot be empty")
-                elif typer.confirm(f"Remove key '{key_id}' from config", default=False):
-                    keys_remove(key_id=key_id, config_path=config_path)
+                provider_name = _select_provider_name(config_path)
+                _run_provider_key_settings_panel(config_path, provider_name)
                 _pause()
             elif choice == "7":
                 removed = _remove_unconfigured_provider_keys(config_path=config_path)
                 console.print(f"Removed unconfigured placeholder keys: {removed}")
+                _pause()
+            elif choice == "8":
+                _toggle_provider_key_active(config_path=config_path)
+                _pause()
+            elif choice == "9":
+                _rename_provider_key_id(config_path=config_path)
+                _pause()
+            elif choice == "10":
+                _remove_provider_key_by_number(config_path=config_path)
                 _pause()
             elif choice == "0":
                 return
@@ -1664,7 +2336,7 @@ def _run_service_panel(config_path: str) -> None:
                 "0) Back",
             ],
         )
-        choice = typer.prompt("Select option", default="1").strip()
+        choice = _prompt_menu_choice()
         try:
             if choice == "1":
                 release_channel = _prompt_release_channel(default="stable")
@@ -1715,7 +2387,7 @@ def _run_maintenance_panel(config_path: str) -> bool:
                 "0) Back",
             ],
         )
-        choice = typer.prompt("Select option", default="1").strip()
+        choice = _prompt_menu_choice()
         try:
             if choice == "1":
                 uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
@@ -1739,22 +2411,25 @@ def _run_management_panel(config_path: str) -> None:
             title="SimpleOpenRoad Management Terminal",
             config_path=config_path,
             lines=[
-                "1) Gateway",
-                "2) Providers and keys",
-                "3) Service",
-                "4) Maintenance",
+                "1) Settings",
+                "2) Gateway",
+                "3) Providers and keys",
+                "4) Service",
+                "5) Maintenance",
                 "0) Exit",
             ],
         )
-        choice = typer.prompt("Select section", default="1").strip()
+        choice = _prompt_menu_choice("Select section")
 
         if choice == "1":
-            _run_gateway_panel(config_path=config_path)
+            _run_settings_panel(config_path=config_path)
         elif choice == "2":
-            _run_keys_panel(config_path=config_path)
+            _run_gateway_panel(config_path=config_path)
         elif choice == "3":
-            _run_service_panel(config_path=config_path)
+            _run_keys_panel(config_path=config_path)
         elif choice == "4":
+            _run_service_panel(config_path=config_path)
+        elif choice == "5":
             if _run_maintenance_panel(config_path=config_path):
                 return
         elif choice == "0":

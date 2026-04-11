@@ -5,9 +5,11 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 from app.config.runtime import RuntimeConfig
 from app.core.errors import ErrorClass, GatewayError
+from app.core.security import is_configured_secret
 from app.core.types import LLMUsage, RequestContext, RouterAttempt, RouterDecision, UnifiedLLMRequest
 from app.core.utils import mask_secret, utcnow_iso
 from app.observability.logging import get_logger
@@ -56,6 +58,74 @@ class RoutingEngine:
             return message
         return message.replace(key_value, mask_secret(key_value))
 
+    @staticmethod
+    def _cooldown_error(
+        config,
+        candidates,
+        runtime_states: dict[str, dict],
+    ) -> GatewayError | None:
+        candidate_providers = {candidate.provider for candidate in candidates}
+        if not candidate_providers:
+            return None
+
+        now = datetime.now().astimezone()
+        any_rate_limited = False
+        retry_after_seconds: int | None = None
+        any_blocked = False
+
+        for provider_name in candidate_providers:
+            provider = config.providers.get(provider_name)
+            if provider is None or not provider.enabled:
+                continue
+            for key in provider.keys:
+                if not key.active or not is_configured_secret(key.key):
+                    continue
+                runtime = runtime_states.get(key.id)
+                if runtime and not bool(runtime.get("active", 1)):
+                    continue
+                if runtime and runtime.get("status") == "blocked":
+                    any_blocked = True
+                    if runtime.get("last_error_code") == ErrorClass.RATE_LIMIT.value:
+                        any_rate_limited = True
+                cooldown_until_raw = runtime.get("cooldown_until") if runtime else None
+                if not cooldown_until_raw:
+                    continue
+                try:
+                    cooldown_until = datetime.fromisoformat(cooldown_until_raw)
+                except ValueError:
+                    continue
+                if cooldown_until <= now:
+                    continue
+                seconds_left = max(1, int((cooldown_until - now).total_seconds()))
+                retry_after_seconds = (
+                    seconds_left
+                    if retry_after_seconds is None
+                    else min(retry_after_seconds, seconds_left)
+                )
+                if runtime.get("last_error_code") == ErrorClass.RATE_LIMIT.value:
+                    any_rate_limited = True
+
+        if any_rate_limited:
+            details = {"retry_after_seconds": retry_after_seconds} if retry_after_seconds is not None else None
+            message = "All configured keys are cooling down after rate limit. Retry shortly."
+            if retry_after_seconds is not None:
+                message = f"{message} Retry after about {retry_after_seconds}s."
+            return GatewayError(
+                message=message,
+                error_class=ErrorClass.RATE_LIMIT,
+                status_code=429,
+                details=details,
+            )
+
+        if any_blocked:
+            return GatewayError(
+                message="All configured keys for the selected route are currently blocked.",
+                error_class=ErrorClass.PROVIDER_UNAVAILABLE,
+                status_code=503,
+            )
+
+        return None
+
     async def route_chat_completion(
         self,
         request: UnifiedLLMRequest,
@@ -93,12 +163,16 @@ class RoutingEngine:
         final_error: GatewayError | None = None
         attempt_index = 0
 
-        for candidate in candidates:
+        for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
             if adapter is None:
                 continue
 
-            configured_keys = self.key_registry.get_available_keys(config, candidate.provider)
+            configured_keys = self.key_registry.get_available_keys_for_runtime(
+                config,
+                candidate.provider,
+                runtime_states,
+            )
             if not configured_keys:
                 continue
             selected_keys = select_keys(
@@ -230,6 +304,10 @@ class RoutingEngine:
                                 },
                             )
 
+                        if error_class == ErrorClass.RATE_LIMIT and candidate_index < len(candidates) - 1:
+                            self.key_registry.bump_switch(key.id)
+                            break
+
                         if should_retry_same_key(action, key_attempt, max_attempts):
                             await sleep_with_backoff(config.routing.retry, key_attempt)
                             continue
@@ -247,6 +325,10 @@ class RoutingEngine:
 
         if final_error is not None:
             raise final_error
+
+        cooldown_error = self._cooldown_error(config, candidates, runtime_states)
+        if cooldown_error is not None:
+            raise cooldown_error
 
         raise GatewayError(
             message="No healthy route candidates available",
@@ -276,12 +358,16 @@ class RoutingEngine:
         final_error: GatewayError | None = None
         attempt_index = 0
 
-        for candidate in candidates:
+        for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
             if adapter is None:
                 continue
 
-            configured_keys = self.key_registry.get_available_keys(config, candidate.provider)
+            configured_keys = self.key_registry.get_available_keys_for_runtime(
+                config,
+                candidate.provider,
+                runtime_states,
+            )
             if not configured_keys:
                 continue
             selected_keys = select_keys(
@@ -418,6 +504,10 @@ class RoutingEngine:
                                     "error_class": error_class.value,
                                 },
                             )
+                        if error_class == ErrorClass.RATE_LIMIT and candidate_index < len(candidates) - 1:
+                            self.key_registry.bump_switch(key.id)
+                            break
+
                         if should_retry_same_key(action, key_attempt, max_attempts):
                             await sleep_with_backoff(config.routing.retry, key_attempt)
                             continue
@@ -433,6 +523,9 @@ class RoutingEngine:
 
         if final_error is not None:
             raise final_error
+        cooldown_error = self._cooldown_error(config, candidates, runtime_states)
+        if cooldown_error is not None:
+            raise cooldown_error
         raise GatewayError(
             message="No healthy route candidates available for stream",
             error_class=ErrorClass.PROVIDER_UNAVAILABLE,

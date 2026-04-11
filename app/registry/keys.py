@@ -65,6 +65,21 @@ class KeyRegistry:
             return []
 
         runtime_map = {item["key_id"]: item for item in self.runtime_repo.list_states()}
+        return self._available_keys_from_runtime_map(provider=provider, runtime_map=runtime_map)
+
+    def get_available_keys_for_runtime(
+        self,
+        config: GatewayConfig,
+        provider_name: str,
+        runtime_map: dict[str, dict],
+    ) -> list[KeyConfig]:
+        provider = config.providers.get(provider_name)
+        if not provider or not provider.enabled:
+            return []
+        return self._available_keys_from_runtime_map(provider=provider, runtime_map=runtime_map)
+
+    @staticmethod
+    def _available_keys_from_runtime_map(provider, runtime_map: dict[str, dict]) -> list[KeyConfig]:
         available: list[KeyConfig] = []
         now = utcnow()
         for key in provider.keys:

@@ -57,6 +57,33 @@ class RoutingConfig(BaseModel):
     error_policy: ErrorPolicyConfig = Field(default_factory=ErrorPolicyConfig)
 
 
+class ModelCapabilitiesConfig(BaseModel):
+    tool_capable: list[str] = Field(
+        default_factory=lambda: [
+            "codex",
+            "coder",
+            "grok-code",
+            "customtools",
+            "kimi-k2.5",
+            "gpt-5.",
+            "gpt-4.1",
+            "gpt-4o",
+            "claude",
+            "qwen",
+        ]
+    )
+    tool_disabled: list[str] = Field(
+        default_factory=lambda: [
+            "gemini-2.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash",
+            "gemini-3.1-pro-preview",
+            "haiku",
+            "nano",
+        ]
+    )
+
+
 class KeyLimitsConfig(BaseModel):
     rpm: int | None = None
     tpm: int | None = None
@@ -126,6 +153,7 @@ class GatewayConfig(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    model_capabilities: ModelCapabilitiesConfig = Field(default_factory=ModelCapabilitiesConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     routes: RoutesConfig = Field(default_factory=RoutesConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

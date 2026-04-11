@@ -25,6 +25,26 @@ routing:
     malformed_response: switch_provider
     unsupported_model: switch_provider
 
+model_capabilities:
+  tool_capable:
+    - codex
+    - coder
+    - grok-code
+    - customtools
+    - kimi-k2.5
+    - gpt-5.
+    - gpt-4.1
+    - gpt-4o
+    - claude
+    - qwen
+  tool_disabled:
+    - gemini-2.5-flash
+    - gemini-3.1-flash-lite
+    - gemini-3-flash
+    - gemini-3.1-pro-preview
+    - haiku
+    - nano
+
 providers:
   gemini:
     enabled: true
