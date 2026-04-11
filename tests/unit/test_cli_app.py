@@ -212,6 +212,99 @@ def test_cli_update_runs_installer_with_existing_paths(monkeypatch, tmp_path: Pa
     ]
 
 
+def test_cli_panel_update_uses_plain_defaults(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    config_dir.mkdir(parents=True)
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr("app.cli.app._resolve_bin_dir", lambda install_root, explicit_bin_dir=None: tmp_path / "bin")
+    monkeypatch.setattr(
+        "app.cli.app._resolve_update_version",
+        lambda repo, requested_version: requested_version or "v9.9.9",
+    )
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="3\n1\ny\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "--repo" in called["command"]
+    assert "FHRha/SimpleOpenRoad" in called["command"]
+    assert "--install-dir" in called["command"]
+    assert str(install_root) in called["command"]
+    assert "--version" in called["command"]
+    assert "v9.9.9" in called["command"]
+    assert "Version to install" in result.stdout
+    assert "v9.9.9" in result.stdout
+
+
+def test_cli_update_resolves_latest_before_running_installer(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    bin_dir = tmp_path / "bin"
+    config_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    called: dict[str, list[str]] = {}
+
+    def _fake_run(command: list[str], check: bool = True):
+        called["command"] = command
+
+    monkeypatch.setattr("app.cli.app._run_streaming_command", _fake_run)
+    monkeypatch.setattr(
+        "app.cli.app._resolve_update_version",
+        lambda repo, requested_version: requested_version or "v1.2.4",
+    )
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--install-dir",
+            str(install_root),
+            "--bin-dir",
+            str(bin_dir),
+            "--repo",
+            "owner/repo",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert called["command"] == [
+        "bash",
+        str(install_root / "install.sh"),
+        "--repo",
+        "owner/repo",
+        "--install-dir",
+        str(install_root),
+        "--bin-dir",
+        str(bin_dir),
+        "--version",
+        "v1.2.4",
+    ]
+    assert "Version to install" in result.stdout
+    assert "v1.2.4" in result.stdout
+
+
 def test_cli_routes_set_priority(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)

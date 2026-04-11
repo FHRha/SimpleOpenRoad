@@ -395,6 +395,60 @@ def _resolve_bin_dir(install_root: Path, explicit_bin_dir: str | None = None) ->
     return _default_bin_dir()
 
 
+def _extract_release_tag(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        tag = payload.get("tag_name")
+        return tag.strip() if isinstance(tag, str) and tag.strip() else None
+    if isinstance(payload, list):
+        for item in payload:
+            tag = _extract_release_tag(item)
+            if tag:
+                return tag
+    return None
+
+
+def _resolve_latest_release_tag(repo: str) -> str:
+    normalized_repo = repo.strip().strip("/")
+    if normalized_repo.count("/") != 1:
+        raise typer.BadParameter("repo must use owner/repo format")
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "SimpleOpenRoad CLI",
+    }
+    github_token = os.getenv("GITHUB_TOKEN")
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    urls = [
+        f"https://api.github.com/repos/{normalized_repo}/releases/latest",
+        f"https://api.github.com/repos/{normalized_repo}/releases?per_page=20",
+    ]
+    last_error = ""
+    for url in urls:
+        try:
+            response = httpx.get(url, headers=headers, timeout=15.0)
+            response.raise_for_status()
+            tag = _extract_release_tag(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            last_error = str(exc)
+            continue
+        if tag:
+            return tag
+
+    hint = f": {last_error}" if last_error else ""
+    raise typer.BadParameter(
+        f"Unable to resolve latest release tag for {normalized_repo}{hint}. "
+        "Pass --version <tag> explicitly."
+    )
+
+
+def _resolve_update_version(repo: str, requested_version: str | None) -> str:
+    if requested_version:
+        return requested_version
+    return _resolve_latest_release_tag(repo)
+
+
 def _build_update_command(
     install_root: Path,
     bin_dir: Path,
@@ -983,19 +1037,19 @@ def health(config_path: str = typer.Option("config/config.yaml", help="Path to c
         console.print(row)
 
 
-@cli_app.command("update")
-def update(
-    config_path: str = typer.Option("config/config.yaml", help="Path to current config.yaml"),
-    repo: str = typer.Option("FHRha/SimpleOpenRoad", help="GitHub repository in owner/repo format"),
-    version: str | None = typer.Option(None, help="Release tag to install; defaults to latest"),
-    arch: str | None = typer.Option(None, help="Target archive architecture; defaults to auto-detect"),
-    python_bin: str | None = typer.Option(None, "--python", help="Python binary for venv creation"),
-    install_dir: str | None = typer.Option(None, help="Installed package directory"),
-    bin_dir: str | None = typer.Option(None, help="Directory containing sor wrapper"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Do not prompt for confirmation"),
+def _run_update(
+    config_path: str,
+    repo: str = "FHRha/SimpleOpenRoad",
+    version: str | None = None,
+    arch: str | None = None,
+    python_bin: str | None = None,
+    install_dir: str | None = None,
+    bin_dir: str | None = None,
+    yes: bool = False,
 ) -> None:
     install_root = Path(install_dir).expanduser().resolve() if install_dir else _guess_install_root(config_path)
     resolved_bin_dir = _resolve_bin_dir(install_root=install_root, explicit_bin_dir=bin_dir)
+    resolved_version = _resolve_update_version(repo=repo, requested_version=version)
 
     console.print(
         Panel.fit(
@@ -1004,7 +1058,7 @@ def update(
                     f"Install dir: {install_root}",
                     f"Binary dir: {resolved_bin_dir}",
                     f"Repo: {repo}",
-                    f"Version: {version or 'latest'}",
+                    f"Version to install: {resolved_version}",
                     "Preserved: .env, config/config.yaml, data/",
                 ]
             ),
@@ -1020,12 +1074,35 @@ def update(
         install_root=install_root,
         bin_dir=resolved_bin_dir,
         repo=repo,
-        version=version,
+        version=resolved_version,
         arch=arch,
         python_bin=python_bin,
     )
     _run_streaming_command(command)
     console.print("Update complete. User settings were preserved.")
+
+
+@cli_app.command("update")
+def update(
+    config_path: str = typer.Option("config/config.yaml", help="Path to current config.yaml"),
+    repo: str = typer.Option("FHRha/SimpleOpenRoad", help="GitHub repository in owner/repo format"),
+    version: str | None = typer.Option(None, help="Release tag to install; defaults to latest"),
+    arch: str | None = typer.Option(None, help="Target archive architecture; defaults to auto-detect"),
+    python_bin: str | None = typer.Option(None, "--python", help="Python binary for venv creation"),
+    install_dir: str | None = typer.Option(None, help="Installed package directory"),
+    bin_dir: str | None = typer.Option(None, help="Directory containing sor wrapper"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not prompt for confirmation"),
+) -> None:
+    _run_update(
+        config_path=config_path,
+        repo=repo,
+        version=version,
+        arch=arch,
+        python_bin=python_bin,
+        install_dir=install_dir,
+        bin_dir=bin_dir,
+        yes=yes,
+    )
 
 
 @cli_app.command("uninstall")
@@ -1372,7 +1449,7 @@ def _run_service_panel(config_path: str) -> None:
         choice = typer.prompt("Select option", default="1").strip()
         try:
             if choice == "1":
-                update(config_path=config_path, yes=False)
+                _run_update(config_path=config_path, yes=False)
                 _pause()
             elif choice == "2":
                 service_install(config_path=config_path, mode="system", run_as=None, start=True)
