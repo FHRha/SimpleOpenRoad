@@ -10,7 +10,7 @@ from datetime import datetime
 from app.config.runtime import RuntimeConfig
 from app.core.errors import ErrorClass, GatewayError
 from app.core.security import is_configured_secret
-from app.core.types import LLMUsage, RequestContext, RouterAttempt, RouterDecision, UnifiedLLMRequest
+from app.core.types import LLMUsage, RequestContext, RouteCandidate, RouterAttempt, RouterDecision, UnifiedLLMRequest
 from app.core.utils import mask_secret, utcnow_iso
 from app.observability.logging import get_logger
 from app.providers.base import ProviderAdapter
@@ -59,6 +59,27 @@ class RoutingEngine:
         if not mask_secrets or not key_value:
             return message
         return message.replace(key_value, mask_secret(key_value))
+
+    @staticmethod
+    def _candidate_detail(candidate, status: str, reason: str, keys: int | None = None) -> dict:
+        detail = {
+            "provider": candidate.provider,
+            "model": candidate.model,
+            "status": status,
+            "reason": reason,
+        }
+        if keys is not None:
+            detail["available_keys"] = keys
+        return detail
+
+    @staticmethod
+    def _diagnostic_candidates(config, request: UnifiedLLMRequest, candidates: list[RouteCandidate]) -> list[RouteCandidate]:
+        if candidates:
+            return candidates
+        if request.model in config.routes.aliases:
+            alias_cfg = config.routes.aliases[request.model]
+            return [RouteCandidate(provider=c.provider, model=c.model) for c in alias_cfg.candidates]
+        return []
 
     @staticmethod
     def _cooldown_error(
@@ -164,10 +185,12 @@ class RoutingEngine:
         runtime_states = {s["key_id"]: s for s in self.key_registry.runtime_repo.list_states()}
         final_error: GatewayError | None = None
         attempt_index = 0
+        candidate_details: list[dict] = []
 
         for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
             if adapter is None:
+                candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_not_registered"))
                 continue
 
             configured_keys = self.key_registry.get_available_keys_for_runtime(
@@ -176,7 +199,11 @@ class RoutingEngine:
                 runtime_states,
             )
             if not configured_keys:
+                candidate_details.append(self._candidate_detail(candidate, "skipped", "no_available_keys", 0))
                 continue
+            candidate_details.append(
+                self._candidate_detail(candidate, "attempted", "keys_available", len(configured_keys))
+            )
             selected_keys = select_keys(
                 strategy=selection_strategy,
                 keys=configured_keys,
@@ -334,10 +361,21 @@ class RoutingEngine:
         if cooldown_error is not None:
             raise cooldown_error
 
+        if not candidate_details:
+            for candidate in self._diagnostic_candidates(config, request, candidates):
+                provider = config.providers.get(candidate.provider)
+                if provider is None:
+                    candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_not_configured"))
+                elif not provider.enabled:
+                    candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_disabled"))
+                else:
+                    candidate_details.append(self._candidate_detail(candidate, "skipped", "no_available_keys", 0))
+
         raise GatewayError(
             message="No healthy route candidates available",
             error_class=ErrorClass.PROVIDER_UNAVAILABLE,
             status_code=503,
+            details={"candidates": candidate_details},
         )
 
     async def route_chat_completion_stream(
@@ -361,10 +399,12 @@ class RoutingEngine:
         runtime_states = {s["key_id"]: s for s in self.key_registry.runtime_repo.list_states()}
         final_error: GatewayError | None = None
         attempt_index = 0
+        candidate_details: list[dict] = []
 
         for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
             if adapter is None:
+                candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_not_registered"))
                 continue
 
             configured_keys = self.key_registry.get_available_keys_for_runtime(
@@ -373,7 +413,11 @@ class RoutingEngine:
                 runtime_states,
             )
             if not configured_keys:
+                candidate_details.append(self._candidate_detail(candidate, "skipped", "no_available_keys", 0))
                 continue
+            candidate_details.append(
+                self._candidate_detail(candidate, "attempted", "keys_available", len(configured_keys))
+            )
             selected_keys = select_keys(
                 strategy=selection_strategy,
                 keys=configured_keys,
@@ -445,10 +489,55 @@ class RoutingEngine:
 
                         return with_first_chunk(), decision
                     except StopAsyncIteration:
-                        async def done_stream() -> AsyncIterator[bytes]:
-                            yield b"data: [DONE]\n\n"
-
-                        return done_stream(), decision
+                        gateway_error = GatewayError(
+                            message="Provider stream ended before assistant content or tool calls",
+                            error_class=ErrorClass.MALFORMED_RESPONSE,
+                            status_code=502,
+                            provider=candidate.provider,
+                            key_id=key.id,
+                        )
+                        latency_ms = (time.perf_counter() - start) * 1000
+                        error_class = gateway_error.error_class
+                        error_message = self._sanitize_error_message(
+                            message=gateway_error.message,
+                            key_value=key.key,
+                            mask_secrets=config.security.mask_secrets_in_logs,
+                        )
+                        final_error = gateway_error
+                        self.key_registry.record_failure(key, error_class, error_message)
+                        self.stats_repo.record_request(
+                            provider=candidate.provider,
+                            key_id=key.id,
+                            success=False,
+                            latency_ms=latency_ms,
+                            usage=None,
+                        )
+                        if config.observability.save_attempt_events:
+                            self.attempts_repo.add_attempt(
+                                request_id=context.request_id,
+                                route_alias=context.route_alias,
+                                provider=candidate.provider,
+                                key_id=key.id,
+                                model=candidate.model,
+                                attempt_index=attempt_index,
+                                outcome="failure",
+                                error_class=error_class.value,
+                                latency_ms=latency_ms,
+                                created_at=utcnow_iso(),
+                            )
+                        decision.attempts.append(
+                            RouterAttempt(
+                                attempt_index=attempt_index,
+                                provider=candidate.provider,
+                                key_id=key.id,
+                                model=candidate.model,
+                                success=False,
+                                latency_ms=latency_ms,
+                                error_class=error_class,
+                                error_message=error_message,
+                            )
+                        )
+                        continue
                     except Exception as exc:  # noqa: BLE001 - normalized below
                         latency_ms = (time.perf_counter() - start) * 1000
                         error_class = classify_error(exc)
@@ -536,10 +625,20 @@ class RoutingEngine:
         cooldown_error = self._cooldown_error(config, candidates, runtime_states)
         if cooldown_error is not None:
             raise cooldown_error
+        if not candidate_details:
+            for candidate in self._diagnostic_candidates(config, request, candidates):
+                provider = config.providers.get(candidate.provider)
+                if provider is None:
+                    candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_not_configured"))
+                elif not provider.enabled:
+                    candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_disabled"))
+                else:
+                    candidate_details.append(self._candidate_detail(candidate, "skipped", "no_available_keys", 0))
         raise GatewayError(
             message="No healthy route candidates available for stream",
             error_class=ErrorClass.PROVIDER_UNAVAILABLE,
             status_code=503,
+            details={"candidates": candidate_details},
         )
 
     @staticmethod

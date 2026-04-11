@@ -141,14 +141,17 @@ async def chat_completions(
         result, request_id = await container.gateway_service.chat_completions(request)
         return JSONResponse(content=result, headers={"x-request-id": request_id})
     except GatewayError as exc:
+        detail = {
+            "message": exc.message,
+            "type": exc.error_class.value,
+            "provider": exc.provider,
+            "key_id": exc.key_id,
+        }
+        if exc.details:
+            detail["details"] = exc.details
         raise HTTPException(
             status_code=exc.status_code,
-            detail={
-                "message": exc.message,
-                "type": exc.error_class.value,
-                "provider": exc.provider,
-                "key_id": exc.key_id,
-            },
+            detail=detail,
         ) from exc
 
 
@@ -170,12 +173,15 @@ async def responses(
         result, request_id = await container.gateway_service.responses(request)
         return JSONResponse(content=result, headers={"x-request-id": request_id})
     except GatewayError as exc:
+        detail = {
+            "message": exc.message,
+            "type": exc.error_class.value,
+            "provider": exc.provider,
+            "key_id": exc.key_id,
+        }
+        if exc.details:
+            detail["details"] = exc.details
         raise HTTPException(
             status_code=exc.status_code,
-            detail={
-                "message": exc.message,
-                "type": exc.error_class.value,
-                "provider": exc.provider,
-                "key_id": exc.key_id,
-            },
+            detail=detail,
         ) from exc

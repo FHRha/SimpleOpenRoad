@@ -412,3 +412,32 @@ def test_failover_switches_to_next_provider(monkeypatch, tmp_path: Path) -> None
         assert attempts[0]["outcome"] == "failure"
         assert attempts[1]["provider"] == "openrouter"
         assert attempts[1]["outcome"] == "success"
+
+
+def test_503_includes_route_candidate_diagnostics(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, require_auth=True)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["providers"]["github"]["keys"] = []
+    data["providers"]["openrouter"]["keys"] = []
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MASTER_API_KEY", "master-key")
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-api-key": "master-key"},
+            json={
+                "model": "auto/fast",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["type"] == "provider_unavailable"
+    assert detail["details"]["candidates"]
+    assert detail["details"]["candidates"][0]["reason"] == "no_available_keys"
