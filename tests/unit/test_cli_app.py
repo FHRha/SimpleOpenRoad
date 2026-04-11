@@ -399,7 +399,18 @@ def test_api_base_url_fallbacks_to_detected_ip(monkeypatch, tmp_path: Path) -> N
 
 
 def test_setup_summary_prints_openai_plugin_settings(monkeypatch, tmp_path: Path, capsys) -> None:
-    config_path = _write_config(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "providers": {},
+                "routes": {"aliases": {}},
+                "health": {"startup_check": False},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     cfg = load_gateway_config(str(config_path))
 
     monkeypatch.delenv("APP_PUBLIC_DOMAIN", raising=False)
@@ -410,8 +421,13 @@ def test_setup_summary_prints_openai_plugin_settings(monkeypatch, tmp_path: Path
 
     output = capsys.readouterr().out
     assert "Base URL: http://10.20.30.40:12345/v1" in output
-    assert "Models: auto/fast" in output
-    assert "Recommended default: auto/fast" in output
+    assert "auto/fast" in output
+    assert "Recommended default: auto/smart" in output
+    assert "Model Alias Guide" in output
+    assert "auto/smart" in output
+    assert "recommended default; local heuristic" in output
+    assert "auto/code" in output
+    assert "coding, debugging, refactoring" in output
     assert "Alias fallback: candidates are tried in order" in output
     assert "Chat endpoint: http://10.20.30.40:12345/v1/chat/completions" in output
 

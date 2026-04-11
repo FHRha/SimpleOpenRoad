@@ -190,6 +190,29 @@ def _recommended_model_alias(cfg: GatewayConfig) -> str:
     return next(iter(aliases), "<no aliases configured>")
 
 
+def _model_alias_help_rows(cfg: GatewayConfig) -> list[tuple[str, str]]:
+    descriptions = {
+        "auto/smart": "recommended default; local heuristic chooses fast/balanced/strong/code candidates",
+        "auto/fast": "lightweight, cheap, low-latency tasks",
+        "auto/balanced": "general chat and medium tasks with better quality",
+        "auto/strong": "hard reasoning, long context, complex analysis",
+        "auto/code": "coding, debugging, refactoring, repository work",
+    }
+    rows: list[tuple[str, str]] = []
+    for alias in cfg.routes.aliases:
+        rows.append((alias, descriptions.get(alias, "custom route alias from config.yaml")))
+    return rows
+
+
+def _print_alias_help_table(cfg: GatewayConfig) -> None:
+    table = Table(title="Model Alias Guide", box=box.ASCII)
+    table.add_column("Alias")
+    table.add_column("Use for")
+    for alias, description in _model_alias_help_rows(cfg):
+        table.add_row(alias, description)
+    console.print(table)
+
+
 def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     api_base = _resolve_api_base_url(cfg)
     openai_base = f"{api_base}/v1"
@@ -205,6 +228,7 @@ def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     console.print(f"- Chat endpoint: {openai_base}/chat/completions")
     console.print(f"- Responses endpoint: {openai_base}/responses")
     console.print(f"- Health: {api_base}/health")
+    _print_alias_help_table(cfg)
 
 
 def _resolve_local_api_base_url(cfg: GatewayConfig) -> str:
@@ -246,6 +270,7 @@ def _print_api_access(config_path: str) -> None:
     table.add_row("Header", "x-api-key: <MASTER_API_KEY>")
     table.add_row("Alt header", "Authorization: Bearer <MASTER_API_KEY>")
     console.print(table)
+    _print_alias_help_table(cfg)
     console.print("Use Gateway -> Test API request to run an automatic local check.")
 
 
