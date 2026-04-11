@@ -150,12 +150,12 @@ setup_background_runtime() {
   if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     echo "Configuring background service (systemd)"
     if [[ "${EUID}" -eq 0 ]]; then
-      PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/sor" service install --mode system --config-path "${config_path}"
+      PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/sor" service install --mode system --config-path "${config_path}" --no-summary
       echo "Service mode: system"
       BACKGROUND_MODE="systemd-system"
       STATUS_HINT="${BIN_DIR}/sor service status --mode system"
     else
-      PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/sor" service install --mode user --config-path "${config_path}"
+      PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/sor" service install --mode user --config-path "${config_path}" --no-summary
       echo "Service mode: user"
       BACKGROUND_MODE="systemd-user"
       STATUS_HINT="${BIN_DIR}/sor service status --mode user"
@@ -179,6 +179,30 @@ setup_background_runtime() {
   echo "Background process started with PID $(cat "${INSTALL_DIR}/run/sor.pid")"
   BACKGROUND_MODE="nohup"
   STATUS_HINT="tail -n 100 ${INSTALL_DIR}/run/sor.out.log"
+}
+
+print_final_summary() {
+  cat <<EOF
++------------------------------------------------------------------+
+| Thank you for installing SimpleOpenRoad                          |
++------------------------------------------------------------------+
+| Open panel: sor                                                  |
+|                                                                  |
+| Quick guide:                                                     |
+| 1. Gateway -> Setup summary                                      |
+|    Check Base URL and model aliases for plugins                  |
+| 2. Gateway -> API access token and test                          |
+|    Copy MASTER_API_KEY and run the automatic API check           |
+| 3. Providers and keys -> Add provider key (wizard)               |
+|    Add your provider keys before real use                        |
+| 4. Service -> Install diagnostics                                |
+|    Verify install path/version if something looks wrong          |
+|                                                                  |
+| Binary: ${BIN_DIR}/sor                                           |
+| Install dir: ${INSTALL_DIR}                                      |
+| Config: ${INSTALL_DIR}/config/config.yaml                        |
++------------------------------------------------------------------+
+EOF
 }
 
 preserve_existing_state() {
@@ -428,8 +452,8 @@ then
 fi
 
 echo "Installing SimpleOpenRoad"
-"${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade pip
-"${INSTALL_DIR}/.venv/bin/python" -m pip install -e "${INSTALL_DIR}"
+"${INSTALL_DIR}/.venv/bin/python" -m pip install --upgrade -q pip
+"${INSTALL_DIR}/.venv/bin/python" -m pip install -q -e "${INSTALL_DIR}"
 
 cat > "${BIN_DIR}/sor" <<EOF
 #!/usr/bin/env bash
@@ -440,17 +464,7 @@ chmod +x "${BIN_DIR}/sor"
 
 setup_background_runtime
 
-echo "Installation complete"
-echo "Binary: ${BIN_DIR}/sor"
-echo "Config: ${INSTALL_DIR}/config/config.yaml"
-echo "Architecture: ${ARCH}"
-echo "Python binary: ${PYTHON_BIN}"
-echo "Background mode: ${BACKGROUND_MODE}"
-echo "Status command: ${STATUS_HINT}"
-echo "OpenAPI docs: http://127.0.0.1:12345/docs"
-echo "Management terminal: sor"
-echo "API token and curl example: run 'sor' and select option 2"
-echo "Full uninstall: sor uninstall --full"
+print_final_summary
 
 if ! command -v sor >/dev/null 2>&1; then
   echo "Note: 'sor' is not available in PATH for this shell."

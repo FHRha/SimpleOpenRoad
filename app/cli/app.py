@@ -1349,6 +1349,7 @@ def service_install(
     mode: str = typer.Option("system", help="Install mode: system or user"),
     run_as: str | None = typer.Option(None, help="Linux user for system mode service"),
     start: bool = typer.Option(True, help="Start service right after install"),
+    summary: bool = typer.Option(True, "--summary/--no-summary", help="Print setup summary after install", hidden=True),
 ) -> None:
     selected_mode = _service_mode(mode)
     _ensure_systemd_available()
@@ -1375,7 +1376,8 @@ def service_install(
     if selected_mode == "user":
         current_user = os.getenv("USER") or "<user>"
         console.print(f"To keep user service alive without SSH session: sudo loginctl enable-linger {current_user}")
-    _print_setup_summary(config_path=config_path, cfg=cfg)
+    if summary:
+        _print_setup_summary(config_path=config_path, cfg=cfg)
 
 
 @service_app.command("uninstall")
