@@ -20,7 +20,9 @@ from app.router.backoff import sleep_with_backoff
 from app.router.classifier import classify_error
 from app.router.model_planner import plan_candidates
 from app.router.policy import policy_action, should_retry_same_key, should_switch_provider
+from app.router.response_validator import validate_chat_completion_payload, validate_responses_payload
 from app.router.selector import select_keys
+from app.router.stream_normalizer import normalize_openai_stream
 from app.storage.repositories.attempts_repo import AttemptsRepository
 from app.storage.repositories.stats_repo import StatsRepository
 
@@ -198,8 +200,10 @@ class RoutingEngine:
                     try:
                         if kind == "chat":
                             payload = await adapter.chat_completions(candidate_request, key)
+                            validate_chat_completion_payload(payload, provider=candidate.provider, key_id=key.id)
                         else:
                             payload = await adapter.responses(candidate_request, key)
+                            validate_responses_payload(payload, provider=candidate.provider, key_id=key.id)
                         latency_ms = (time.perf_counter() - start) * 1000
 
                         self.key_registry.record_success(key.id, latency_ms)
@@ -391,7 +395,13 @@ class RoutingEngine:
                     candidate_request = request.model_copy(update={"model": candidate.model, "stream": True})
                     try:
                         iterator = await adapter.stream_chat_completions(candidate_request, key)
-                        first_chunk = await anext(iterator)
+                        normalized_iterator = normalize_openai_stream(
+                            iterator,
+                            model=candidate.model,
+                            provider=candidate.provider,
+                            key_id=key.id,
+                        )
+                        first_chunk = await anext(normalized_iterator)
                         latency_ms = (time.perf_counter() - start) * 1000
 
                         self.key_registry.record_success(key.id, latency_ms)
@@ -430,13 +440,13 @@ class RoutingEngine:
 
                         async def with_first_chunk() -> AsyncIterator[bytes]:
                             yield first_chunk
-                            async for chunk in iterator:
+                            async for chunk in normalized_iterator:
                                 yield chunk
 
                         return with_first_chunk(), decision
                     except StopAsyncIteration:
                         async def done_stream() -> AsyncIterator[bytes]:
-                            yield b"data: [DONE]\\n\\n"
+                            yield b"data: [DONE]\n\n"
 
                         return done_stream(), decision
                     except Exception as exc:  # noqa: BLE001 - normalized below

@@ -62,10 +62,22 @@ class GeminiAdapter(ProviderAdapter):
     def _map_non_stream_to_openai(self, data: dict[str, Any], request: UnifiedLLMRequest) -> dict[str, Any]:
         candidates = data.get("candidates", []) if isinstance(data, dict) else []
         text = ""
+        finish_reason = None
         if candidates:
-            content = candidates[0].get("content", {})
+            candidate = candidates[0]
+            finish_reason = candidate.get("finishReason")
+            content = candidate.get("content", {})
             parts = content.get("parts", []) if isinstance(content, dict) else []
             text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+
+        if not text:
+            reason_suffix = f" finishReason={finish_reason}" if finish_reason else ""
+            raise GatewayError(
+                message=f"Gemini returned no assistant text.{reason_suffix}",
+                error_class=ErrorClass.MALFORMED_RESPONSE,
+                status_code=502,
+                provider=self.provider_name,
+            )
 
         usage_meta = data.get("usageMetadata", {}) if isinstance(data, dict) else {}
         prompt_tokens = int(usage_meta.get("promptTokenCount", 0) or 0)
@@ -207,6 +219,9 @@ class GeminiAdapter(ProviderAdapter):
                             )
 
                         chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
+                        emitted_role = False
+                        emitted_text = False
+                        finish_reason = None
                         async for line in response.aiter_lines():
                             if not line:
                                 continue
@@ -220,11 +235,29 @@ class GeminiAdapter(ProviderAdapter):
                             text_delta = ""
                             candidates = payload_obj.get("candidates", [])
                             if candidates:
-                                content = candidates[0].get("content", {})
+                                candidate = candidates[0]
+                                finish_reason = candidate.get("finishReason") or finish_reason
+                                content = candidate.get("content", {})
                                 parts = content.get("parts", []) if isinstance(content, dict) else []
                                 text_delta = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
                             if not text_delta:
                                 continue
+                            if not emitted_role:
+                                role_chunk = {
+                                    "id": chunk_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": request.model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": {"role": "assistant"},
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                }
+                                yield f"data: {json.dumps(role_chunk, ensure_ascii=True)}\n\n".encode("utf-8")
+                                emitted_role = True
                             chunk = {
                                 "id": chunk_id,
                                 "object": "chat.completion.chunk",
@@ -238,7 +271,18 @@ class GeminiAdapter(ProviderAdapter):
                                     }
                                 ],
                             }
-                            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\\n\\n".encode("utf-8")
+                            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n".encode("utf-8")
+                            emitted_text = True
+
+                        if not emitted_text:
+                            reason_suffix = f" finishReason={finish_reason}" if finish_reason else ""
+                            raise GatewayError(
+                                message=f"Gemini stream returned no assistant text.{reason_suffix}",
+                                error_class=ErrorClass.MALFORMED_RESPONSE,
+                                status_code=502,
+                                provider=self.provider_name,
+                                key_id=key.id,
+                            )
 
                         final_chunk = {
                             "id": chunk_id,
@@ -247,8 +291,8 @@ class GeminiAdapter(ProviderAdapter):
                             "model": request.model,
                             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                         }
-                        yield f"data: {json.dumps(final_chunk, ensure_ascii=True)}\\n\\n".encode("utf-8")
-                        yield b"data: [DONE]\\n\\n"
+                        yield f"data: {json.dumps(final_chunk, ensure_ascii=True)}\n\n".encode("utf-8")
+                        yield b"data: [DONE]\n\n"
             except httpx.TimeoutException as exc:
                 raise GatewayError(
                     message="Timeout contacting gemini",

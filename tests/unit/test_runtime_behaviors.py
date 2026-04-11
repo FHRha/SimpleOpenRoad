@@ -57,7 +57,7 @@ class DummyProviderAdapter(ProviderAdapter):
 
     async def stream_chat_completions(self, request: UnifiedLLMRequest, key) -> AsyncIterator[bytes]:  # type: ignore[override]
         async def _iter() -> AsyncIterator[bytes]:
-            yield b"data: [DONE]\\n\\n"
+            yield b"data: [DONE]\n\n"
 
         return _iter()
 
@@ -84,6 +84,24 @@ class RateLimitFirstModelAdapter(DummyProviderAdapter):
                 provider=self.provider_name,
                 key_id=key.id,
             )
+        return await super().chat_completions(request, key)
+
+
+class EmptyChatFirstModelAdapter(DummyProviderAdapter):
+    async def chat_completions(self, request: UnifiedLLMRequest, key):  # type: ignore[override]
+        if request.model == "m1":
+            return {
+                "id": "chatcmpl-empty",
+                "object": "chat.completion",
+                "created": 1,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
         return await super().chat_completions(request, key)
 
 
@@ -311,3 +329,61 @@ async def test_router_switches_to_next_model_when_first_model_rate_limited(tmp_p
     assert payload["choices"][0]["message"]["content"] == "ok"
     assert payload["model"] == "p1/m2"
     assert [attempt.model for attempt in decision.attempts] == ["m1", "m2"]
+
+
+@pytest.mark.asyncio
+async def test_router_switches_to_next_model_when_first_model_returns_empty_chat(tmp_path: Path) -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "routing": {
+                "default_strategy": "strict_priority",
+                "retry": {"max_attempts_per_candidate": 1},
+            },
+            "providers": {
+                "p1": {
+                    "enabled": True,
+                    "priority": 10,
+                    "endpoint": "https://example.invalid",
+                    "keys": [{"id": "p1-main", "key": "secret-main", "priority": 100}],
+                }
+            },
+            "routes": {
+                "aliases": {
+                    "auto/fast": {
+                        "strategy": "strict_priority",
+                        "candidates": [
+                            {"provider": "p1", "model": "m1"},
+                            {"provider": "p1", "model": "m2"},
+                        ],
+                    }
+                }
+            },
+            "storage": {"sqlite_path": str(tmp_path / "gateway.db")},
+            "health": {"check_timeout_seconds": 0},
+        }
+    )
+    runtime_config = RuntimeConfig(config=config, env=EnvSettings())
+    db = SQLiteDB(runtime_config.get().storage.sqlite_path)
+    db.initialize(str(_schema_path()))
+    keys_repo = KeysRuntimeRepository(db)
+    attempts_repo = AttemptsRepository(db)
+    stats_repo = StatsRepository(db)
+    key_registry = KeyRegistry(keys_repo)
+    key_registry.sync_defaults(runtime_config.get())
+
+    engine = RoutingEngine(
+        runtime_config=runtime_config,
+        key_registry=key_registry,
+        attempts_repo=attempts_repo,
+        stats_repo=stats_repo,
+    )
+    engine.providers = {"p1": EmptyChatFirstModelAdapter()}
+
+    request = UnifiedLLMRequest(model="auto/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="auto/fast", stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["choices"][0]["message"]["content"] == "ok"
+    assert payload["model"] == "p1/m2"
+    assert [attempt.model for attempt in decision.attempts] == ["m1", "m2"]
+    assert decision.attempts[0].error_class == ErrorClass.MALFORMED_RESPONSE

@@ -141,10 +141,16 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                                 provider=self.provider_name,
                                 key_id=key.id,
                             )
+                        event_lines: list[str] = []
                         async for line in response.aiter_lines():
-                            if not line:
+                            if line:
+                                event_lines.append(line)
                                 continue
-                            yield (line + "\n").encode("utf-8")
+                            if event_lines:
+                                yield ("\n".join(event_lines) + "\n\n").encode("utf-8")
+                                event_lines.clear()
+                        if event_lines:
+                            yield ("\n".join(event_lines) + "\n\n").encode("utf-8")
             except httpx.TimeoutException as exc:
                 raise GatewayError(
                     message=f"Timeout contacting {self.provider_name}",

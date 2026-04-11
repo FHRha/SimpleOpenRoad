@@ -54,8 +54,8 @@ class SuccessAdapter(ProviderAdapter):
                 "model": request.model,
                 "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}],
             }
-            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\\n\\n".encode("utf-8")
-            yield b"data: [DONE]\\n\\n"
+            yield f"data: {json.dumps(chunk, ensure_ascii=True)}\n\n".encode("utf-8")
+            yield b"data: [DONE]\n\n"
 
         return iterator()
 
