@@ -97,6 +97,7 @@ class RouteCandidateConfig(BaseModel):
 
 class AliasRouteConfig(BaseModel):
     strategy: str = ROUTE_STRICT_PRIORITY
+    selection: str = "ordered"
     candidates: list[RouteCandidateConfig] = Field(default_factory=list)
 
 

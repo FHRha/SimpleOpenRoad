@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from app.config.loader import load_gateway_config
 from app.cli.app import cli_app
 from app.cli.app import _ensure_env_master_admin_keys
+from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
 from app.cli.app import _service_mode
 from app.cli.app import _service_unit_path
@@ -395,6 +396,24 @@ def test_api_base_url_fallbacks_to_detected_ip(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr("app.cli.app._detect_server_ip", lambda: "10.20.30.40")
 
     assert _resolve_api_base_url(cfg) == "http://10.20.30.40:12345"
+
+
+def test_setup_summary_prints_openai_plugin_settings(monkeypatch, tmp_path: Path, capsys) -> None:
+    config_path = _write_config(tmp_path)
+    cfg = load_gateway_config(str(config_path))
+
+    monkeypatch.delenv("APP_PUBLIC_DOMAIN", raising=False)
+    monkeypatch.delenv("APP_DOMAIN", raising=False)
+    monkeypatch.setattr("app.cli.app._detect_server_ip", lambda: "10.20.30.40")
+
+    _print_setup_summary(config_path=str(config_path), cfg=cfg)
+
+    output = capsys.readouterr().out
+    assert "Base URL: http://10.20.30.40:12345/v1" in output
+    assert "Models: auto/fast" in output
+    assert "Recommended default: auto/fast" in output
+    assert "Alias fallback: candidates are tried in order" in output
+    assert "Chat endpoint: http://10.20.30.40:12345/v1/chat/completions" in output
 
 
 def test_service_mode_validation() -> None:

@@ -52,6 +52,18 @@ sor start --config-path config/config.yaml
 
 The installer generates `MASTER_API_KEY` in `.env`. You can view it or run an automatic API test from the terminal panel with `sor` -> `Gateway` -> `API access token and test`.
 
+For OpenAI-compatible plugins and clients, use:
+
+```text
+Base URL: http://<SERVER_IP>:12345/v1
+API Key: <MASTER_API_KEY>
+Model: auto/smart
+```
+
+Use `auto/smart` as the default model name in plugins. It uses a local low-cost heuristic to pick a fast, balanced, strong, or code-oriented candidate based on request size, output budget, and code/reasoning hints. Use `auto/fast` when you explicitly want lightweight models only. Other default aliases are `auto/balanced`, `auto/strong`, and `auto/code`.
+
+You can also request a direct model. Use `provider/model` to force one provider, for example `openrouter/openai/gpt-5.4-mini`, or use an exact model id such as `gpt-5.4-mini` to try that same model id across your configured providers.
+
 ```bash
 MASTER_API_KEY="$(grep '^MASTER_API_KEY=' .env | cut -d= -f2-)"
 

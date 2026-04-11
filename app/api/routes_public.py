@@ -10,8 +10,18 @@ from app.api.schemas_openai import ChatCompletionsRequestSchema, ResponsesReques
 from app.container import AppContainer
 from app.core.errors import GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
+from app.router.alias_resolver import resolve_candidates
 
 router = APIRouter()
+
+
+def _model_item(model_id: str) -> dict:
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "simple-open-road",
+    }
 
 
 @router.get("/health")
@@ -27,6 +37,28 @@ async def health(container: AppContainer = Depends(get_container)) -> dict:
 @router.get("/providers", dependencies=[Depends(require_user_auth)])
 async def providers(container: AppContainer = Depends(get_container)) -> list[dict]:
     return container.admin_service.list_providers()
+
+
+@router.get("/v1/models", dependencies=[Depends(require_user_auth)])
+async def models(container: AppContainer = Depends(get_container)) -> dict:
+    cfg = container.runtime_config.get()
+    seen: set[str] = set()
+    data: list[dict] = []
+
+    for alias_name in cfg.routes.aliases:
+        candidates, _ = resolve_candidates(cfg, alias_name)
+        if not candidates:
+            continue
+        if alias_name not in seen:
+            data.append(_model_item(alias_name))
+            seen.add(alias_name)
+        for candidate in candidates:
+            direct_model_id = f"{candidate.provider}/{candidate.model}"
+            if direct_model_id not in seen:
+                data.append(_model_item(direct_model_id))
+                seen.add(direct_model_id)
+
+    return {"object": "list", "data": data}
 
 
 @router.post("/v1/chat/completions", dependencies=[Depends(require_user_auth)])

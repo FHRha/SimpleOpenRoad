@@ -14,9 +14,9 @@ from app.observability.logging import get_logger
 from app.providers.base import ProviderAdapter
 from app.providers.registry import build_provider_registry
 from app.registry.keys import KeyRegistry
-from app.router.alias_resolver import resolve_candidates
 from app.router.backoff import sleep_with_backoff
 from app.router.classifier import classify_error
+from app.router.model_planner import plan_candidates
 from app.router.policy import policy_action, should_retry_same_key, should_switch_provider
 from app.router.selector import select_keys
 from app.storage.repositories.attempts_repo import AttemptsRepository
@@ -77,7 +77,7 @@ class RoutingEngine:
         context: RequestContext,
     ) -> tuple[dict, RouterDecision]:
         config = self.runtime_config.get()
-        candidates, resolved_alias = resolve_candidates(config, request.model)
+        candidates, resolved_alias = plan_candidates(config, request)
         selection_strategy = config.routing.default_strategy
         if resolved_alias and resolved_alias in config.routes.aliases:
             selection_strategy = config.routes.aliases[resolved_alias].strategy
@@ -260,7 +260,7 @@ class RoutingEngine:
         context: RequestContext,
     ) -> tuple[AsyncIterator[bytes], RouterDecision]:
         config = self.runtime_config.get()
-        candidates, resolved_alias = resolve_candidates(config, request.model)
+        candidates, resolved_alias = plan_candidates(config, request)
         selection_strategy = config.routing.default_strategy
         if resolved_alias and resolved_alias in config.routes.aliases:
             selection_strategy = config.routes.aliases[resolved_alias].strategy

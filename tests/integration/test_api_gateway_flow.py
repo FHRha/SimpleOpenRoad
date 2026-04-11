@@ -128,14 +128,14 @@ def _write_config(tmp_path: Path, require_auth: bool = True) -> Path:
             "aliases": {
                 "auto/fast": {
                     "strategy": "strict_priority",
-                    "candidates": [{"provider": "github", "model": "gpt-4.1-mini"}],
-                },
-                "auto/fallback": {
-                    "strategy": "strict_priority",
                     "candidates": [
                         {"provider": "github", "model": "gpt-4.1-mini"},
                         {"provider": "openrouter", "model": "gpt-4o-mini"},
                     ],
+                },
+                "auto/balanced": {
+                    "strategy": "strict_priority",
+                    "candidates": [{"provider": "openrouter", "model": "openai/gpt-4o"}],
                 },
             }
         },
@@ -188,6 +188,26 @@ def test_auth_for_user_and_admin_endpoints(monkeypatch, tmp_path: Path) -> None:
         assert client.get("/keys").status_code == 401
         assert client.get("/providers", headers={"x-api-key": "master-key"}).status_code == 200
         assert client.get("/keys", headers={"x-admin-key": "admin-key"}).status_code == 200
+
+
+def test_openai_models_lists_aliases_and_direct_provider_models(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, require_auth=True)
+    monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MASTER_API_KEY", "master-key")
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
+
+    app = create_app()
+
+    with TestClient(app) as client:
+        response = client.get("/v1/models", headers={"Authorization": "Bearer master-key"})
+
+    assert response.status_code == 200
+    model_ids = [item["id"] for item in response.json()["data"]]
+    assert "auto/fast" in model_ids
+    assert "auto/balanced" in model_ids
+    assert "github/gpt-4.1-mini" in model_ids
+    assert "openrouter/gpt-4o-mini" in model_ids
+    assert "auto/fallback" not in model_ids
 
 
 def test_chat_responses_and_stream_with_mocked_provider(monkeypatch, tmp_path: Path) -> None:
@@ -260,7 +280,7 @@ def test_failover_switches_to_next_provider(monkeypatch, tmp_path: Path) -> None
             "/v1/chat/completions",
             headers={"x-api-key": "master-key"},
             json={
-                "model": "auto/fallback",
+                "model": "auto/fast",
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )

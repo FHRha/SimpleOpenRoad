@@ -176,12 +176,34 @@ def _resolve_api_base_url(cfg: GatewayConfig) -> str:
     return f"http://{_detect_server_ip()}:{cfg.server.port}"
 
 
+def _format_model_aliases(cfg: GatewayConfig) -> str:
+    aliases = list(cfg.routes.aliases)
+    return ", ".join(aliases) if aliases else "<no aliases configured>"
+
+
+def _recommended_model_alias(cfg: GatewayConfig) -> str:
+    aliases = cfg.routes.aliases
+    if "auto/smart" in aliases:
+        return "auto/smart"
+    if "auto/fast" in aliases:
+        return "auto/fast"
+    return next(iter(aliases), "<no aliases configured>")
+
+
 def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     api_base = _resolve_api_base_url(cfg)
+    openai_base = f"{api_base}/v1"
     console.print("Setup complete. Management and API endpoints:")
     console.print(f"- CLI: sor doctor --config-path {config_path}")
-    console.print(f"- API base: {api_base}")
-    console.print(f"- Chat: {api_base}/v1/chat/completions")
+    console.print("- OpenAI-compatible plugin settings:")
+    console.print(f"  Base URL: {openai_base}")
+    console.print("  API key: MASTER_API_KEY from .env or Gateway -> API access token and test")
+    console.print(f"  Models: {_format_model_aliases(cfg)}")
+    console.print(f"  Recommended default: {_recommended_model_alias(cfg)}")
+    console.print("  Direct model format: provider/model or exact model id")
+    console.print("  Alias fallback: candidates are tried in order; providers without keys are skipped")
+    console.print(f"- Chat endpoint: {openai_base}/chat/completions")
+    console.print(f"- Responses endpoint: {openai_base}/responses")
     console.print(f"- Health: {api_base}/health")
 
 
@@ -202,6 +224,7 @@ def _print_api_access(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
     token = _current_master_api_key()
     api_base = _resolve_api_base_url(cfg)
+    openai_base = f"{api_base}/v1"
 
     console.print(
         Panel.fit(
@@ -215,7 +238,10 @@ def _print_api_access(config_path: str) -> None:
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("Protection", "enabled" if cfg.security.require_master_key else "disabled")
-    table.add_row("API base", api_base)
+    table.add_row("OpenAI-compatible Base URL", openai_base)
+    table.add_row("Chat endpoint", f"{openai_base}/chat/completions")
+    table.add_row("Model aliases", _format_model_aliases(cfg))
+    table.add_row("Direct model", "provider/model or exact model id")
     table.add_row("MASTER_API_KEY", token if cfg.security.require_master_key else "<not required>")
     table.add_row("Header", "x-api-key: <MASTER_API_KEY>")
     table.add_row("Alt header", "Authorization: Bearer <MASTER_API_KEY>")
