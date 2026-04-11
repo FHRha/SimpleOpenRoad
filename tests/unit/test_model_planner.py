@@ -94,3 +94,25 @@ def test_request_profile_can_be_overridden_by_metadata() -> None:
     )
 
     assert classify_request_profile(request) == "code"
+
+
+def test_adaptive_planner_prefers_tool_capable_candidate_for_tool_request() -> None:
+    cfg = _adaptive_config()
+    request = UnifiedLLMRequest(
+        model="auto/smart",
+        messages=[ChatMessage(role="user", content="hello")],
+        extra_body={
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "read_file", "parameters": {"type": "object", "properties": {}}},
+                }
+            ]
+        },
+    )
+
+    candidates, alias = plan_candidates(cfg, request)
+
+    assert alias == "auto/smart"
+    assert candidates[0].provider == "openrouter"
+    assert candidates[0].model == "openai/gpt-5.3-codex"

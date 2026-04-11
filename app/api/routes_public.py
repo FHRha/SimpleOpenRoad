@@ -14,6 +14,33 @@ from app.router.alias_resolver import resolve_candidates
 
 router = APIRouter()
 
+_CHAT_KNOWN_EXTRA_FIELDS = {
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "n",
+    "user",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "stream_options",
+    "reasoning_effort",
+    "modalities",
+}
+_RESPONSES_KNOWN_EXTRA_FIELDS = {
+    "instructions",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "response_format",
+    "stream_options",
+    "reasoning_effort",
+    "text",
+    "user",
+}
+
 
 def _model_item(model_id: str) -> dict:
     return {
@@ -22,6 +49,36 @@ def _model_item(model_id: str) -> dict:
         "created": 0,
         "owned_by": "simple-open-road",
     }
+
+
+def _message_to_core(message) -> ChatMessage:
+    extra = dict(message.model_extra or {})
+    return ChatMessage(
+        role=message.role,
+        content=message.content,
+        name=message.name,
+        tool_call_id=message.tool_call_id,
+        tool_calls=message.tool_calls,
+        **extra,
+    )
+
+
+def _chat_extra_body(payload: ChatCompletionsRequestSchema) -> dict:
+    extra = dict(payload.model_extra or {})
+    for field_name in _CHAT_KNOWN_EXTRA_FIELDS:
+        value = getattr(payload, field_name, None)
+        if value is not None:
+            extra[field_name] = value
+    return extra
+
+
+def _responses_extra_body(payload: ResponsesRequestSchema) -> dict:
+    extra = dict(payload.model_extra or {})
+    for field_name in _RESPONSES_KNOWN_EXTRA_FIELDS:
+        value = getattr(payload, field_name, None)
+        if value is not None:
+            extra[field_name] = value
+    return extra
 
 
 @router.get("/health")
@@ -68,12 +125,13 @@ async def chat_completions(
 ):
     request = UnifiedLLMRequest(
         model=payload.model,
-        messages=[ChatMessage(role=m.role, content=m.content) for m in payload.messages],
+        messages=[_message_to_core(m) for m in payload.messages],
         input=payload.input,
         stream=payload.stream,
         temperature=payload.temperature,
-        max_tokens=payload.max_tokens,
+        max_tokens=payload.max_tokens or payload.max_completion_tokens,
         metadata=payload.metadata,
+        extra_body=_chat_extra_body(payload),
     )
     try:
         if payload.stream:
@@ -104,8 +162,9 @@ async def responses(
         input=payload.input,
         stream=payload.stream,
         temperature=payload.temperature,
-        max_tokens=payload.max_tokens,
+        max_tokens=payload.max_tokens or payload.max_output_tokens,
         metadata=payload.metadata,
+        extra_body=_responses_extra_body(payload),
     )
     try:
         result, request_id = await container.gateway_service.responses(request)

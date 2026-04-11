@@ -12,7 +12,7 @@ import httpx
 
 from app.config.models import KeyConfig, ProviderConfig
 from app.core.errors import ErrorClass, GatewayError
-from app.core.types import UnifiedLLMRequest
+from app.core.types import UnifiedLLMRequest, stringify_content
 from app.providers.base import ProviderAdapter
 
 
@@ -30,14 +30,26 @@ class GeminiAdapter(ProviderAdapter):
 
     def _to_gemini_payload(self, request: UnifiedLLMRequest) -> dict[str, Any]:
         contents: list[dict[str, Any]] = []
-        if request.messages:
-            for msg in request.messages:
-                role = "model" if msg.role == "assistant" else "user"
-                contents.append({"role": role, "parts": [{"text": msg.content}]})
+        system_parts: list[str] = []
+        for msg in request.messages:
+            if msg.role in {"system", "developer"}:
+                text = stringify_content(msg.content)
+                if text:
+                    system_parts.append(text)
+                continue
+            role = "model" if msg.role == "assistant" else "user"
+            contents.append({"role": role, "parts": [{"text": stringify_content(msg.content)}]})
+        instructions = stringify_content(request.extra_body.get("instructions"))
+        if instructions:
+            system_parts.append(instructions)
+        if not contents and request.messages:
+            contents.append({"role": "user", "parts": [{"text": ""}]})
         elif request.input is not None:
-            contents.append({"role": "user", "parts": [{"text": str(request.input)}]})
+            contents.append({"role": "user", "parts": [{"text": stringify_content(request.input)}]})
 
         payload: dict[str, Any] = {"contents": contents}
+        if system_parts:
+            payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(part for part in system_parts if part)}]}
         generation_config: dict[str, Any] = {}
         if request.temperature is not None:
             generation_config["temperature"] = request.temperature

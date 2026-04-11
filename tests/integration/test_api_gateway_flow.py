@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.config.models import ProviderConfig
 from app.core.errors import ErrorClass, GatewayError
-from app.core.types import UnifiedLLMRequest
+from app.core.types import UnifiedLLMRequest, stringify_content
 from app.main import create_app
 from app.providers.base import ProviderAdapter
 
@@ -18,7 +18,7 @@ class SuccessAdapter(ProviderAdapter):
     async def chat_completions(self, request: UnifiedLLMRequest, key) -> dict:  # type: ignore[override]
         text = "ok"
         if request.messages:
-            text = request.messages[-1].content
+            text = stringify_content(request.messages[-1].content)
         return {
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -75,6 +75,21 @@ class UnsupportedModelAdapter(SuccessAdapter):
             provider=self.provider_name,
             key_id=key.id,
         )
+
+
+class RecordingAdapter(SuccessAdapter):
+    def __init__(self, provider_name: str, config: ProviderConfig):
+        super().__init__(provider_name=provider_name, config=config)
+        self.last_chat_request: UnifiedLLMRequest | None = None
+        self.last_responses_request: UnifiedLLMRequest | None = None
+
+    async def chat_completions(self, request: UnifiedLLMRequest, key) -> dict:  # type: ignore[override]
+        self.last_chat_request = request
+        return await super().chat_completions(request, key)
+
+    async def responses(self, request: UnifiedLLMRequest, key) -> dict:  # type: ignore[override]
+        self.last_responses_request = request
+        return await super().responses(request, key)
 
 
 def _write_config(tmp_path: Path, require_auth: bool = True) -> Path:
@@ -260,6 +275,105 @@ def test_chat_responses_and_stream_with_mocked_provider(monkeypatch, tmp_path: P
             body = b"".join(stream_resp.iter_bytes()).decode("utf-8", errors="replace")
             assert stream_resp.status_code == 200
             assert "data: [DONE]" in body
+
+
+def test_chat_accepts_cline_style_openai_payload(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, require_auth=True)
+    monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MASTER_API_KEY", "master-key")
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
+
+    app = create_app()
+    github_adapter = RecordingAdapter(provider_name="github", config=_provider_cfg(app, "github"))
+    openrouter_adapter = RecordingAdapter(provider_name="openrouter", config=_provider_cfg(app, "openrouter"))
+    _patch_adapters(app, github_adapter, openrouter_adapter)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-api-key": "master-key"},
+            json={
+                "model": "auto/fast",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "hello from cline"}],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "description": "Read file contents",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+                "stream_options": {"include_usage": True},
+                "reasoning_effort": "medium",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "hello from cline"
+    assert github_adapter.last_chat_request is not None
+    assert stringify_content(github_adapter.last_chat_request.messages[0].content) == "hello from cline"
+    assert github_adapter.last_chat_request.extra_body["tool_choice"] == "auto"
+    assert github_adapter.last_chat_request.extra_body["reasoning_effort"] == "medium"
+    assert github_adapter.last_chat_request.extra_body["stream_options"] == {"include_usage": True}
+    assert github_adapter.last_chat_request.extra_body["tools"][0]["function"]["name"] == "read_file"
+
+
+def test_responses_accepts_structured_openai_payload(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, require_auth=True)
+    monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MASTER_API_KEY", "master-key")
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
+
+    app = create_app()
+    github_adapter = RecordingAdapter(provider_name="github", config=_provider_cfg(app, "github"))
+    openrouter_adapter = RecordingAdapter(provider_name="openrouter", config=_provider_cfg(app, "openrouter"))
+    _patch_adapters(app, github_adapter, openrouter_adapter)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/responses",
+            headers={"x-api-key": "master-key"},
+            json={
+                "model": "auto/smart",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Summarize this file"}],
+                    }
+                ],
+                "instructions": "Answer briefly",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+                "tool_choice": "auto",
+                "max_output_tokens": 256,
+                "text": {"format": {"type": "text"}},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"] == str(
+        [{"role": "user", "content": [{"type": "input_text", "text": "Summarize this file"}]}]
+    )
+    assert github_adapter.last_responses_request is not None
+    assert github_adapter.last_responses_request.max_tokens == 256
+    assert github_adapter.last_responses_request.extra_body["instructions"] == "Answer briefly"
+    assert github_adapter.last_responses_request.extra_body["tool_choice"] == "auto"
+    assert github_adapter.last_responses_request.extra_body["text"] == {"format": {"type": "text"}}
 
 
 def test_failover_switches_to_next_provider(monkeypatch, tmp_path: Path) -> None:

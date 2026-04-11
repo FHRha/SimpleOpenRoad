@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from app.config.models import GatewayConfig
-from app.core.types import RouteCandidate, UnifiedLLMRequest
+from app.core.types import RouteCandidate, UnifiedLLMRequest, stringify_content
 from app.router.alias_resolver import resolve_candidates
 
 TaskProfile = Literal["fast", "balanced", "strong", "code"]
@@ -58,16 +58,41 @@ PROFILE_SCORE: dict[TaskProfile, dict[TaskProfile, int]] = {
 
 
 def _stringify_input(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    return str(value)
+    return stringify_content(value)
+
+
+def _request_uses_tools(request: UnifiedLLMRequest) -> bool:
+    if request.extra_body.get("tools"):
+        return True
+    return any(message.role in {"tool", "function"} or bool(message.tool_calls) for message in request.messages)
+
+
+def _candidate_supports_tools(candidate: RouteCandidate) -> bool:
+    model = candidate.model.lower()
+    provider = candidate.provider.lower()
+    if provider == "gemini":
+        return "customtools" in model
+    return any(
+        marker in model
+        for marker in (
+            "codex",
+            "coder",
+            "grok-code",
+            "customtools",
+            "kimi-k2.5",
+            "gpt-5.",
+            "gpt-4.1",
+            "gpt-4o",
+            "claude",
+            "qwen",
+        )
+    )
 
 
 def estimate_request_tokens(request: UnifiedLLMRequest) -> int:
-    text_parts = [message.content for message in request.messages]
+    text_parts = [stringify_content(message.content) for message in request.messages]
     text_parts.append(_stringify_input(request.input))
+    text_parts.append(_stringify_input(request.extra_body.get("instructions")))
     text_parts.extend(str(value) for value in request.metadata.values())
     char_count = sum(len(part) for part in text_parts)
     output_budget = request.max_tokens or 0
@@ -79,7 +104,15 @@ def classify_request_profile(request: UnifiedLLMRequest) -> TaskProfile:
     if isinstance(explicit, str) and explicit in {"fast", "balanced", "strong", "code"}:
         return explicit  # type: ignore[return-value]
 
-    text = "\n".join([message.content for message in request.messages] + [_stringify_input(request.input)]).lower()
+    if _request_uses_tools(request):
+        return "code"
+
+    text = "\n".join(
+        [
+            stringify_content(message.content) for message in request.messages
+        ]
+        + [_stringify_input(request.input), _stringify_input(request.extra_body.get("instructions"))]
+    ).lower()
     token_estimate = estimate_request_tokens(request)
     code_hits = sum(1 for hint in CODE_HINTS if hint in text)
     strong_hits = sum(1 for hint in STRONG_HINTS if hint in text)
@@ -109,9 +142,15 @@ def classify_candidate_profile(candidate: RouteCandidate) -> TaskProfile:
 
 
 def _rank_adaptive_candidates(candidates: list[RouteCandidate], profile: TaskProfile) -> list[RouteCandidate]:
+    tool_capable = [candidate for candidate in candidates if _candidate_supports_tools(candidate)]
+    if profile == "code" and tool_capable:
+        candidates = tool_capable
     return sorted(
         candidates,
-        key=lambda candidate: -PROFILE_SCORE[profile][classify_candidate_profile(candidate)],
+        key=lambda candidate: (
+            0 if profile != "code" else int(not _candidate_supports_tools(candidate)),
+            -PROFILE_SCORE[profile][classify_candidate_profile(candidate)],
+        ),
     )
 
 

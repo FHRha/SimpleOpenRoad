@@ -62,6 +62,8 @@ Model: auto/smart
 
 Use `auto/smart` as the default model name in plugins. It uses a local low-cost heuristic to pick a fast, balanced, strong, or code-oriented candidate based on request size, output budget, and code/reasoning hints. Use `auto/fast` when you explicitly want lightweight models only. Other default aliases are `auto/balanced`, `auto/strong`, and `auto/code`.
 
+The OpenAI-compatible gateway accepts both simple requests and agent-style payloads. Plain `curl` chat calls with string `messages[].content` work, and so do richer OpenAI-style payloads with structured content parts, `tools`, `tool_choice`, `stream_options`, `reasoning_effort`, and `/v1/responses` requests with `instructions`.
+
 You can also request a direct model. Use `provider/model` to force one provider, for example `openrouter/openai/gpt-5.4-mini`, or use an exact model id such as `gpt-5.4-mini` to try that same model id across your configured providers.
 
 ```bash

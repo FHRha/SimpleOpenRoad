@@ -32,8 +32,9 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "model": request.model,
             "stream": request.stream,
         }
+        payload.update(request.extra_body)
         if request.messages:
-            payload["messages"] = [m.model_dump() for m in request.messages]
+            payload["messages"] = [m.model_dump(exclude_none=True) for m in request.messages]
         if request.input is not None:
             payload["input"] = request.input
         if request.temperature is not None:
