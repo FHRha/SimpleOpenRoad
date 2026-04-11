@@ -29,3 +29,19 @@ def extract_admin_key(headers: dict[str, str]) -> str | None:
     if direct:
         return direct
     return extract_bearer_token(normalized.get(HEADER_AUTHORIZATION))
+
+
+def is_configured_secret(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip()
+    if not normalized:
+        return False
+    if normalized.startswith("${") and normalized.endswith("}"):
+        return False
+    return normalized not in {
+        "change-me-master-key",
+        "change-me-admin-key",
+        "change-me",
+        "<TOKEN>",
+    }

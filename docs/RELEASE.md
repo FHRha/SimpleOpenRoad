@@ -68,6 +68,27 @@ Override repository (for forks):
 
 - curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash -s -- --repo <owner>/<repo>
 
+## Update Flow for Installed Servers
+
+Interactive terminal:
+
+- sor
+- choose `10) Update SimpleOpenRoad`
+
+CLI:
+
+- sor update
+- sor update --version v0.1.1
+
+Updates preserve user-owned state:
+
+- .env
+- config/config.yaml
+- data/
+- provider keys stored in config/config.yaml
+
+The installer refreshes application files from the release archive, reinstalls the editable package in the existing virtual environment, recreates the wrapper binary if needed, and restarts/reinstalls the background service using the existing config path.
+
 ## Notes
 
 - Installer supports Linux only.

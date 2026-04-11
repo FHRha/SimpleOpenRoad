@@ -18,11 +18,13 @@
 - Verify `routing.error_policy` in config.
 - Check key runtime status (`sor keys list`) for cooldown/blocking.
 - Confirm alias candidate order with `sor routes list`.
+- If old placeholder keys appear, run `sor keys list --all` and clean them from the panel with `sor` -> option `9`.
 
 ## No route candidates available
 - At least one provider must be `enabled: true`.
 - At least one key must be active and not in cooldown.
 - Verify route aliases point to existing providers/models.
+- Placeholder values like `${GEMINI_API_KEY_MAIN}` are ignored by routing; add real provider keys with `sor keys wizard`.
 
 ## Config reload fails
 - Run `sor config validate` first.

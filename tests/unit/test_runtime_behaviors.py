@@ -173,6 +173,37 @@ def test_key_is_blocked_after_max_consecutive_errors(tmp_path: Path) -> None:
     assert state["status"] == "blocked"
 
 
+def test_unconfigured_placeholder_keys_are_not_available(tmp_path: Path) -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "providers": {
+                "p1": {
+                    "enabled": True,
+                    "endpoint": "https://example.invalid",
+                    "keys": [
+                        {"id": "p1-placeholder", "key": "${P1_API_KEY}", "priority": 100},
+                        {"id": "p1-real", "key": "real-secret", "priority": 10},
+                    ],
+                }
+            },
+            "storage": {"sqlite_path": str(tmp_path / "gateway.db")},
+        }
+    )
+    db = SQLiteDB(config.storage.sqlite_path)
+    db.initialize(str(_schema_path()))
+    keys_repo = KeysRuntimeRepository(db)
+    key_registry = KeyRegistry(keys_repo)
+    key_registry.sync_defaults(config)
+
+    available = key_registry.get_available_keys(config, "p1")
+    listed = key_registry.list_configured_keys(config)
+    listed_all = key_registry.list_configured_keys(config, include_unconfigured=True)
+
+    assert [key.id for key in available] == ["p1-real"]
+    assert [row["id"] for row in listed] == ["p1-real"]
+    assert [row["id"] for row in listed_all] == ["p1-placeholder", "p1-real"]
+
+
 @pytest.mark.asyncio
 async def test_health_checker_respects_check_timeout(tmp_path: Path) -> None:
     runtime_config = _build_runtime_config(str(tmp_path / "gateway.db"))

@@ -180,6 +180,42 @@ setup_background_runtime() {
   STATUS_HINT="tail -n 100 ${INSTALL_DIR}/run/sor.out.log"
 }
 
+preserve_existing_state() {
+  PRESERVE_DIR="${TMP_DIR}/preserve"
+  mkdir -p "${PRESERVE_DIR}"
+
+  if [[ -f "${INSTALL_DIR}/.env" ]]; then
+    mkdir -p "${PRESERVE_DIR}"
+    cp "${INSTALL_DIR}/.env" "${PRESERVE_DIR}/.env"
+  fi
+
+  if [[ -f "${INSTALL_DIR}/config/config.yaml" ]]; then
+    mkdir -p "${PRESERVE_DIR}/config"
+    cp "${INSTALL_DIR}/config/config.yaml" "${PRESERVE_DIR}/config/config.yaml"
+  fi
+
+  if [[ -d "${INSTALL_DIR}/data" ]]; then
+    mkdir -p "${PRESERVE_DIR}"
+    cp -R "${INSTALL_DIR}/data" "${PRESERVE_DIR}/data"
+  fi
+}
+
+restore_existing_state() {
+  if [[ -f "${PRESERVE_DIR}/.env" ]]; then
+    cp "${PRESERVE_DIR}/.env" "${INSTALL_DIR}/.env"
+  fi
+
+  if [[ -f "${PRESERVE_DIR}/config/config.yaml" ]]; then
+    mkdir -p "${INSTALL_DIR}/config"
+    cp "${PRESERVE_DIR}/config/config.yaml" "${INSTALL_DIR}/config/config.yaml"
+  fi
+
+  if [[ -d "${PRESERVE_DIR}/data" ]]; then
+    rm -rf "${INSTALL_DIR}/data"
+    cp -R "${PRESERVE_DIR}/data" "${INSTALL_DIR}/data"
+  fi
+}
+
 if [[ "${OSTYPE:-}" != linux* ]]; then
   echo "This installer currently supports Linux only." >&2
   exit 1
@@ -279,7 +315,10 @@ if [[ ! -d "${EXTRACTED_DIR}" ]]; then
 fi
 
 mkdir -p "${INSTALL_DIR}" "${BIN_DIR}"
+preserve_existing_state
 cp -R "${EXTRACTED_DIR}/." "${INSTALL_DIR}/"
+restore_existing_state
+echo "Preserved user state: .env, config/config.yaml, data/"
 
 if [[ ! -f "${INSTALL_DIR}/config/config.yaml" ]]; then
   cp "${INSTALL_DIR}/config/config.example.yaml" "${INSTALL_DIR}/config/config.yaml"
@@ -334,6 +373,8 @@ echo "Background mode: ${BACKGROUND_MODE}"
 echo "Status command: ${STATUS_HINT}"
 echo "OpenAPI docs: http://127.0.0.1:12345/docs"
 echo "Management terminal: sor"
+echo "API token and curl example: run 'sor' and select option 2"
+echo "Full uninstall: sor uninstall --full"
 
 if ! command -v sor >/dev/null 2>&1; then
   echo "Note: 'sor' is not available in PATH for this shell."

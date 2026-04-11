@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from app.config.models import GatewayConfig, KeyConfig
 from app.core.errors import ErrorClass
+from app.core.security import is_configured_secret
 from app.core.utils import utcnow
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
 
@@ -17,23 +18,29 @@ class KeyRegistry:
     def sync_defaults(self, config: GatewayConfig) -> None:
         for provider_name, provider in config.providers.items():
             for key in provider.keys:
+                if not is_configured_secret(key.key):
+                    continue
                 self.runtime_repo.upsert_default(
                     provider=provider_name,
                     key_id=key.id,
                     active=key.active,
                 )
 
-    def list_configured_keys(self, config: GatewayConfig) -> list[dict]:
+    def list_configured_keys(self, config: GatewayConfig, include_unconfigured: bool = False) -> list[dict]:
         runtime_map = {item["key_id"]: item for item in self.runtime_repo.list_states()}
         items: list[dict] = []
         for provider_name, provider in config.providers.items():
             for key in provider.keys:
+                configured = is_configured_secret(key.key)
+                if not configured and not include_unconfigured:
+                    continue
                 state = runtime_map.get(key.id, {})
                 items.append(
                     {
                         "provider": provider_name,
                         "id": key.id,
                         "alias": key.alias,
+                        "configured": configured,
                         "active": bool(state.get("active", 1)) and key.active,
                         "status": state.get("status", "unknown"),
                         "priority": key.priority,
@@ -62,6 +69,8 @@ class KeyRegistry:
         now = utcnow()
         for key in provider.keys:
             runtime = runtime_map.get(key.id)
+            if not is_configured_secret(key.key):
+                continue
             if not key.active:
                 continue
             if runtime and not bool(runtime.get("active", 1)):

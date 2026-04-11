@@ -50,40 +50,14 @@ providers:
     priority: 10
     endpoint: https://generativelanguage.googleapis.com
     timeout_seconds: 40
-    keys:
-      - id: gemini-main
-        key: ${GEMINI_API_KEY_MAIN}
-        active: true
-        priority: 100
-        weight: 1
-        tags: [primary, fast]
-        limits:
-          rpm: 60
-        cooldown:
-          rate_limit_seconds: 30
-          error_seconds: 15
-        max_retries: 1
-        max_consecutive_errors: 5
+    keys: []
 
   github:
     enabled: true
     priority: 20
     endpoint: https://models.inference.ai.azure.com
     timeout_seconds: 45
-    keys:
-      - id: github-main
-        key: ${GITHUB_MODELS_TOKEN}
-        active: true
-        priority: 90
-        weight: 1
-        tags: [fallback]
-        limits:
-          rpm: 60
-        cooldown:
-          rate_limit_seconds: 20
-          error_seconds: 10
-        max_retries: 1
-        max_consecutive_errors: 5
+    keys: []
 
   openrouter:
     enabled: true
@@ -93,20 +67,7 @@ providers:
     headers:
       HTTP-Referer: https://localhost
       X-Title: ai-gateway-router
-    keys:
-      - id: openrouter-main
-        key: ${OPENROUTER_API_KEY}
-        active: true
-        priority: 80
-        weight: 1
-        tags: [fallback, broad]
-        limits:
-          rpm: 60
-        cooldown:
-          rate_limit_seconds: 20
-          error_seconds: 10
-        max_retries: 1
-        max_consecutive_errors: 5
+    keys: []
 
 routes:
   aliases:

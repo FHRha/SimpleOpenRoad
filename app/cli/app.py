@@ -20,13 +20,16 @@ from urllib.parse import urlparse
 import typer
 import uvicorn
 import yaml
+from rich import box
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from app.config.loader import load_gateway_config
 from app.config.models import GatewayConfig
 from app.container import AppContainer
 from app.core.errors import ConfigError
+from app.core.security import is_configured_secret
 from app.core.utils import mask_secret
 
 cli_app = typer.Typer(
@@ -80,6 +83,19 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _save_yaml(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=False), encoding="utf-8")
+
+
+def _load_env_file(env_path: Path = Path(".env")) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not env_path.exists():
+        return values
+    for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
 
 
 def _container(config_path: str | None) -> AppContainer:
@@ -148,6 +164,40 @@ def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     console.print(f"- API base: {api_base}")
     console.print(f"- Chat: {api_base}/v1/chat/completions")
     console.print(f"- Health: {api_base}/health")
+
+
+def _print_api_access(config_path: str) -> None:
+    created_env, generated_keys = _ensure_env_master_admin_keys()
+    _print_env_setup_hint(created_env=created_env, generated_keys=generated_keys)
+    cfg = load_gateway_config(config_path=config_path)
+    token = os.getenv("MASTER_API_KEY") or _load_env_file().get("MASTER_API_KEY", "")
+    api_base = _resolve_api_base_url(cfg)
+
+    console.print(
+        Panel.fit(
+            "SimpleOpenRoad API Access",
+            title="Access Token",
+            border_style="green",
+            box=box.ASCII,
+        )
+    )
+    if cfg.security.require_master_key:
+        console.print("User API protection: enabled")
+        console.print(f"MASTER_API_KEY: {token}")
+        console.print("Use either header:")
+        console.print(f"- x-api-key: {token}")
+        console.print(f"- Authorization: Bearer {token}")
+    else:
+        console.print("User API protection: disabled in config security.require_master_key")
+
+    console.print("Test request:")
+    console.print(
+        "curl -X POST "
+        f"{api_base}/v1/chat/completions "
+        '-H "Content-Type: application/json" '
+        f'-H "x-api-key: {token}" '
+        "-d '{\"model\":\"auto/fast\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
+    )
 
 
 def _generate_api_key(length: int = 40) -> str:
@@ -242,9 +292,64 @@ def _run_command(command: list[str], check: bool = True) -> subprocess.Completed
     return proc
 
 
+def _run_streaming_command(command: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run(command, text=True)
+    if check and proc.returncode != 0:
+        raise typer.BadParameter(f"command failed: {' '.join(command)}")
+    return proc
+
+
 def _run_systemctl(mode: str, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     command = [*_systemctl_base(mode), *args]
     return _run_command(command, check=check)
+
+
+def _default_bin_dir() -> Path:
+    if sys.platform.startswith("linux"):
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid) and geteuid() == 0 and Path("/usr/local/bin").is_dir():
+            return Path("/usr/local/bin")
+    return Path.home() / ".local" / "bin"
+
+
+def _resolve_bin_dir(install_root: Path, explicit_bin_dir: str | None = None) -> Path:
+    if explicit_bin_dir:
+        return Path(explicit_bin_dir).expanduser().resolve()
+    binaries = _candidate_sor_binaries(install_root)
+    if binaries:
+        return binaries[0].parent
+    return _default_bin_dir()
+
+
+def _build_update_command(
+    install_root: Path,
+    bin_dir: Path,
+    repo: str,
+    version: str | None,
+    arch: str | None,
+    python_bin: str | None,
+) -> list[str]:
+    installer_path = install_root / "install.sh"
+    if not installer_path.exists():
+        raise typer.BadParameter(f"Installer script not found: {installer_path}")
+
+    command = [
+        "bash",
+        str(installer_path),
+        "--repo",
+        repo,
+        "--install-dir",
+        str(install_root),
+        "--bin-dir",
+        str(bin_dir),
+    ]
+    if version:
+        command.extend(["--version", version])
+    if arch:
+        command.extend(["--arch", arch])
+    if python_bin:
+        command.extend(["--python", python_bin])
+    return command
 
 
 def _service_exec_start(config_path: str) -> str:
@@ -340,6 +445,88 @@ def _remove_runtime_db(sqlite_path: str) -> list[Path]:
         if candidate.exists():
             candidate.unlink()
             removed.append(candidate)
+    return removed
+
+
+def _is_dangerous_remove_target(path: Path) -> bool:
+    resolved = path.resolve()
+    home = Path.home().resolve()
+    anchors = {Path(anchor).resolve() for anchor in (Path.cwd().anchor, home.anchor) if anchor}
+    return resolved in anchors or resolved == home or str(resolved) in {"", ".", "/"}
+
+
+def _candidate_sor_binaries(install_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    discovered = shutil.which("sor")
+    if discovered:
+        candidates.append(Path(discovered))
+    argv_path = Path(sys.argv[0])
+    if argv_path.exists():
+        candidates.append(argv_path)
+    candidates.extend([Path("/usr/local/bin/sor"), Path.home() / ".local" / "bin" / "sor"])
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    install_text = str(install_root.resolve())
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen or not resolved.exists() or not resolved.is_file():
+            continue
+        seen.add(key)
+        try:
+            text = resolved.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            text = ""
+        if install_text in text or install_root.resolve() in resolved.parents:
+            result.append(resolved)
+    return result
+
+
+def _remove_install_tree(install_root: Path, yes: bool) -> list[Path]:
+    resolved = install_root.resolve()
+    if not resolved.exists():
+        return []
+    if _is_dangerous_remove_target(resolved):
+        raise typer.BadParameter(f"Refusing to remove unsafe install directory: {resolved}")
+    if (resolved / ".git").exists():
+        raise typer.BadParameter(f"Refusing to remove git checkout: {resolved}")
+    if not yes:
+        confirmed = typer.confirm(f"Remove install directory and all package files: {resolved}", default=False)
+        if not confirmed:
+            raise typer.Exit(1)
+
+    shutil.rmtree(resolved)
+    return [resolved]
+
+
+def _remove_unconfigured_provider_keys(config_path: str) -> int:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    providers = data.get("providers", {})
+    if not isinstance(providers, dict):
+        return 0
+
+    removed = 0
+    for provider_cfg in providers.values():
+        if not isinstance(provider_cfg, dict):
+            continue
+        keys = provider_cfg.get("keys", [])
+        if not isinstance(keys, list):
+            continue
+        configured_keys = [
+            item
+            for item in keys
+            if isinstance(item, dict) and is_configured_secret(str(item.get("key", "")))
+        ]
+        removed += len(keys) - len(configured_keys)
+        provider_cfg["keys"] = configured_keys
+
+    if removed:
+        _save_yaml(path, data)
     return removed
 
 
@@ -486,12 +673,19 @@ def providers_test(config_path: str = typer.Option("config/config.yaml", help="P
 
 
 @keys_app.command("list")
-def keys_list(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
+def keys_list(
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+    all_keys: bool = typer.Option(False, "--all", help="Show unconfigured placeholder keys too"),
+) -> None:
     container = _container(config_path)
-    rows = container.admin_service.list_keys()
+    rows = container.key_registry.list_configured_keys(
+        container.runtime_config.get(),
+        include_unconfigured=all_keys,
+    )
     table = Table(title="Keys")
     table.add_column("Provider")
     table.add_column("ID")
+    table.add_column("Configured")
     table.add_column("Active")
     table.add_column("Status")
     table.add_column("Priority")
@@ -501,6 +695,7 @@ def keys_list(config_path: str = typer.Option("config/config.yaml", help="Path t
         table.add_row(
             str(row["provider"]),
             str(row["id"]),
+            "yes" if row.get("configured") else "no",
             str(row["active"]),
             str(row["status"]),
             str(row["priority"]),
@@ -712,15 +907,67 @@ def health(config_path: str = typer.Option("config/config.yaml", help="Path to c
         console.print(row)
 
 
+@cli_app.command("update")
+def update(
+    config_path: str = typer.Option("config/config.yaml", help="Path to current config.yaml"),
+    repo: str = typer.Option("FHRha/SimpleOpenRoad", help="GitHub repository in owner/repo format"),
+    version: str | None = typer.Option(None, help="Release tag to install; defaults to latest"),
+    arch: str | None = typer.Option(None, help="Target archive architecture; defaults to auto-detect"),
+    python_bin: str | None = typer.Option(None, "--python", help="Python binary for venv creation"),
+    install_dir: str | None = typer.Option(None, help="Installed package directory"),
+    bin_dir: str | None = typer.Option(None, help="Directory containing sor wrapper"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not prompt for confirmation"),
+) -> None:
+    install_root = Path(install_dir).expanduser().resolve() if install_dir else _guess_install_root(config_path)
+    resolved_bin_dir = _resolve_bin_dir(install_root=install_root, explicit_bin_dir=bin_dir)
+
+    console.print(
+        Panel.fit(
+            "\n".join(
+                [
+                    f"Install dir: {install_root}",
+                    f"Binary dir: {resolved_bin_dir}",
+                    f"Repo: {repo}",
+                    f"Version: {version or 'latest'}",
+                    "Preserved: .env, config/config.yaml, data/",
+                ]
+            ),
+            title="SimpleOpenRoad Update",
+            border_style="green",
+            box=box.ASCII,
+        )
+    )
+    if not yes and not typer.confirm("Update SimpleOpenRoad now", default=True):
+        raise typer.Exit(0)
+
+    command = _build_update_command(
+        install_root=install_root,
+        bin_dir=resolved_bin_dir,
+        repo=repo,
+        version=version,
+        arch=arch,
+        python_bin=python_bin,
+    )
+    _run_streaming_command(command)
+    console.print("Update complete. User settings were preserved.")
+
+
 @cli_app.command("uninstall")
 def uninstall(
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
     mode: str = typer.Option("system", help="Service mode: system or user"),
     purge_data: bool = typer.Option(False, help="Remove SQLite runtime database files"),
     remove_config: bool = typer.Option(False, help="Remove config file"),
+    full: bool = typer.Option(False, help="Remove service, runtime data, config, wrapper binary and install directory"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not prompt for full uninstall confirmation"),
 ) -> None:
     selected_mode = _service_mode(mode)
+    if full:
+        purge_data = True
+        remove_config = True
+
     cfg = load_gateway_config(config_path=config_path)
+    install_root = _guess_install_root(config_path)
 
     service_cleaned = False
     try:
@@ -758,7 +1005,26 @@ def uninstall(
         else:
             console.print("Config file is already missing.")
 
-    if not service_cleaned and not purge_data and not remove_config:
+    removed_binaries: list[Path] = []
+    removed_install_dirs: list[Path] = []
+    if full:
+        for binary_path in _candidate_sor_binaries(install_root):
+            try:
+                binary_path.unlink()
+                removed_binaries.append(binary_path)
+            except OSError as exc:
+                console.print(f"Could not remove binary {binary_path}: {exc}")
+        removed_install_dirs = _remove_install_tree(install_root, yes=yes)
+        if removed_binaries:
+            console.print("Removed wrapper binaries:")
+            for item in removed_binaries:
+                console.print(f"- {item}")
+        if removed_install_dirs:
+            console.print("Removed install directories:")
+            for item in removed_install_dirs:
+                console.print(f"- {item}")
+
+    if not service_cleaned and not purge_data and not remove_config and not full:
         console.print("Nothing to remove.")
         return
 
@@ -870,23 +1136,45 @@ def service_logs(
 
 
 def _run_management_panel(config_path: str) -> None:
-    console.print("SimpleOpenRoad Management Panel")
     while True:
-        console.print("1) Setup summary (API URL)")
-        console.print("2) Doctor report")
-        console.print("3) List providers")
-        console.print("4) Add provider key (wizard)")
-        console.print("5) List keys")
-        console.print("6) Validate all keys")
-        console.print("7) Show runtime stats")
-        console.print("8) Install system service")
-        console.print("9) Start service")
-        console.print("10) Stop service")
-        console.print("11) Restart service")
-        console.print("12) Service status")
-        console.print("13) Show service logs")
-        console.print("14) Uninstall service")
-        console.print("15) Exit")
+        console.print(
+            Panel.fit(
+                "\n".join(
+                    [
+                        "Gateway",
+                        "1) Setup summary (API URL)",
+                        "2) Show API access token and curl example",
+                        "3) Doctor report",
+                        "4) Show runtime stats",
+                        "",
+                        "Providers and keys",
+                        "5) List providers",
+                        "6) Add provider key (wizard)",
+                        "7) List keys",
+                        "8) Validate all keys",
+                        "9) Clean unconfigured placeholder keys",
+                        "",
+                        "Service",
+                        "10) Update SimpleOpenRoad",
+                        "11) Install system service",
+                        "12) Start service",
+                        "13) Stop service",
+                        "14) Restart service",
+                        "15) Service status",
+                        "16) Show service logs",
+                        "",
+                        "Maintenance",
+                        "17) Uninstall service only",
+                        "18) Full uninstall package",
+                        "0) Exit",
+                    ]
+                ),
+                title="SimpleOpenRoad Management Terminal",
+                subtitle=f"Config: {config_path}",
+                border_style="cyan",
+                box=box.ASCII,
+            )
+        )
         choice = typer.prompt("Select option", default="1").strip()
 
         try:
@@ -894,32 +1182,41 @@ def _run_management_panel(config_path: str) -> None:
                 cfg = load_gateway_config(config_path=config_path)
                 _print_setup_summary(config_path=config_path, cfg=cfg)
             elif choice == "2":
-                doctor(config_path=config_path)
+                _print_api_access(config_path=config_path)
             elif choice == "3":
-                providers_list(config_path=config_path)
+                doctor(config_path=config_path)
             elif choice == "4":
-                _interactive_add_provider_key(config_path=config_path)
-            elif choice == "5":
-                keys_list(config_path=config_path)
-            elif choice == "6":
-                keys_validate(provider=None, key_id=None, config_path=config_path)
-            elif choice == "7":
                 stats(config_path=config_path)
+            elif choice == "5":
+                providers_list(config_path=config_path)
+            elif choice == "6":
+                _interactive_add_provider_key(config_path=config_path)
+            elif choice == "7":
+                keys_list(config_path=config_path, all_keys=False)
             elif choice == "8":
-                service_install(config_path=config_path, mode="system", run_as=None, start=True)
+                keys_validate(provider=None, key_id=None, config_path=config_path)
             elif choice == "9":
-                service_start(mode="system")
+                removed = _remove_unconfigured_provider_keys(config_path=config_path)
+                console.print(f"Removed unconfigured placeholder keys: {removed}")
             elif choice == "10":
-                service_stop(mode="system")
+                update(config_path=config_path, yes=False)
             elif choice == "11":
-                service_restart(mode="system")
+                service_install(config_path=config_path, mode="system", run_as=None, start=True)
             elif choice == "12":
-                service_status(mode="system")
+                service_start(mode="system")
             elif choice == "13":
-                service_logs(mode="system", lines=100)
+                service_stop(mode="system")
             elif choice == "14":
-                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
+                service_restart(mode="system")
             elif choice == "15":
+                service_status(mode="system")
+            elif choice == "16":
+                service_logs(mode="system", lines=100)
+            elif choice == "17":
+                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
+            elif choice == "18":
+                uninstall(config_path=config_path, mode="system", full=True, yes=False)
+            elif choice == "0":
                 return
             else:
                 console.print("Unknown option")

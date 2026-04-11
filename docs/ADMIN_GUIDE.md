@@ -28,6 +28,11 @@ List keys:
 sor keys list
 ```
 
+Show placeholder/unconfigured keys too:
+```bash
+sor keys list --all
+```
+
 Add key:
 ```bash
 sor keys add --provider github --key-id github-backup --secret <TOKEN>
@@ -93,7 +98,39 @@ Explicit panel command:
 sor panel --config-path config/config.yaml
 ```
 
+In the terminal panel:
+- `0` exits the panel.
+- `2` prints the `MASTER_API_KEY` and a ready-to-run curl example.
+- `9` removes old unconfigured placeholder keys from `config.yaml`.
+- `10` updates SimpleOpenRoad while preserving `.env`, `config/config.yaml`, provider keys and `data/`.
+- `18` performs a full package uninstall.
+
+The panel is grouped by area:
+- Gateway: setup summary, API token, doctor, stats.
+- Providers and keys: providers, key wizard, key list, validation, placeholder cleanup.
+- Service: update, install/start/stop/restart/status/logs.
+- Maintenance: service-only uninstall and full package uninstall.
+
+Update package while preserving user settings:
+```bash
+sor update
+```
+
+Update to a specific release:
+```bash
+sor update --version v0.1.1
+```
+
+Full package uninstall:
+```bash
+sor uninstall --full
+```
+
 ## 6. Admin API
+User API header:
+- `x-api-key: <MASTER_API_KEY>`
+- `Authorization: Bearer <MASTER_API_KEY>`
+
 Admin header:
 - `x-admin-key: <ADMIN_API_KEY>`
 

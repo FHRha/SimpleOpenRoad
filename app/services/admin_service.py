@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.config.runtime import RuntimeConfig
+from app.core.security import is_configured_secret
 from app.health.checker import HealthChecker
 from app.observability.metrics import MetricsService
 from app.registry.keys import KeyRegistry
@@ -38,7 +39,7 @@ class AdminService:
                     "priority": provider_cfg.priority,
                     "endpoint": provider_cfg.endpoint,
                     "timeout_seconds": provider_cfg.timeout_seconds,
-                    "keys_count": len(provider_cfg.keys),
+                    "keys_count": sum(1 for key in provider_cfg.keys if is_configured_secret(key.key)),
                 }
             )
         return providers

@@ -7,6 +7,7 @@ import time
 from datetime import UTC, datetime
 
 from app.config.runtime import RuntimeConfig
+from app.core.security import is_configured_secret
 from app.core.utils import utcnow_iso
 from app.providers.base import ProviderAdapter
 from app.registry.keys import KeyRegistry
@@ -50,6 +51,16 @@ class HealthChecker:
                 "models": [],
                 "error_code": "key_not_found",
                 "error_message": "Key not found",
+                "checked_at": utcnow_iso(),
+            }
+        if not is_configured_secret(key.key):
+            return {
+                "provider": provider_name,
+                "key_id": key_id,
+                "status": "unconfigured",
+                "models": [],
+                "error_code": "key_not_configured",
+                "error_message": "Provider key is empty or still uses an environment placeholder",
                 "checked_at": utcnow_iso(),
             }
 
@@ -109,5 +120,7 @@ class HealthChecker:
             if not provider_cfg.enabled or provider_name not in self.providers:
                 continue
             for key in provider_cfg.keys:
+                if not is_configured_secret(key.key):
+                    continue
                 results.append(await self.validate_single_key(provider_name, key.id))
         return results
