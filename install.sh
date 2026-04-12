@@ -44,7 +44,9 @@ raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
 }
 
-try_install_python311_with_apt() {
+try_install_supported_python_with_apt() {
+  local candidate=""
+
   if [[ "${EUID}" -ne 0 ]]; then
     return 1
   fi
@@ -52,9 +54,92 @@ try_install_python311_with_apt() {
     return 1
   fi
 
-  echo "Installing Python 3.11 runtime via apt..."
+  echo "Python >= 3.11 was not found. Trying to install a supported Python runtime via apt..."
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3.11 python3.11-venv
+
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv >/dev/null 2>&1; then
+    if python_is_supported "python3"; then
+      PYTHON_BIN="python3"
+      return 0
+    fi
+  fi
+
+  for candidate in python3.13 python3.12 python3.11; do
+    echo "Trying ${candidate}..."
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y "${candidate}" "${candidate}-venv" >/dev/null 2>&1; then
+      if python_is_supported "${candidate}"; then
+        PYTHON_BIN="${candidate}"
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
+python_major_minor() {
+  local bin="$1"
+  "${bin}" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+}
+
+python_supports_venv() {
+  local bin="$1"
+  local temp_venv=""
+  temp_venv="$(mktemp -d "${TMPDIR:-/tmp}/simple-open-road-venv-check.XXXXXX")"
+  rm -rf "${temp_venv}"
+  if "${bin}" -m venv "${temp_venv}" >/dev/null 2>&1; then
+    rm -rf "${temp_venv}"
+    return 0
+  fi
+  rm -rf "${temp_venv}"
+  return 1
+}
+
+try_install_python_venv_with_apt() {
+  local bin="$1"
+  local version=""
+
+  if [[ "${EUID}" -ne 0 ]]; then
+    return 1
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    return 1
+  fi
+
+  version="$(python_major_minor "${bin}")"
+  echo "Python venv support is missing for ${bin}. Installing python${version}-venv via apt..."
+  apt-get update
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y "python${version}-venv"; then
+    return 0
+  fi
+
+  echo "Could not install python${version}-venv; trying generic python3-venv..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+}
+
+ensure_python_venv_available() {
+  if python_supports_venv "${PYTHON_BIN}"; then
+    return 0
+  fi
+
+  if try_install_python_venv_with_apt "${PYTHON_BIN}" && python_supports_venv "${PYTHON_BIN}"; then
+    return 0
+  fi
+
+  local version=""
+  version="$(python_major_minor "${PYTHON_BIN}" || true)"
+  echo "Python runtime '${PYTHON_BIN}' is available, but venv/ensurepip is missing." >&2
+  if [[ -n "${version}" ]]; then
+    echo "Install python${version}-venv, then rerun the installer." >&2
+    echo "Example: apt install python${version}-venv" >&2
+  else
+    echo "Install the matching python3-venv package, then rerun the installer." >&2
+  fi
+  echo "Alternatively pass --python <binary> that already supports: python -m venv." >&2
+  return 1
 }
 
 resolve_python_bin() {
@@ -75,13 +160,12 @@ resolve_python_bin() {
     fi
   done
 
-  if try_install_python311_with_apt && python_is_supported "python3.11"; then
-    PYTHON_BIN="python3.11"
+  if try_install_supported_python_with_apt; then
     return 0
   fi
 
   echo "Python >= 3.11 was not found." >&2
-  echo "Install python3.11 and python3.11-venv, or run installer with --python <binary>." >&2
+  echo "Install python3.11+ and the matching python3-venv package, or run installer with --python <binary>." >&2
   return 1
 }
 
@@ -169,7 +253,7 @@ maybe_reexec_from_temp_copy() {
 
 extract_release_tag_for_channel() {
   local channel="$1"
-  python3 -c '
+  "${PYTHON_BIN}" -c '
 import json
 import sys
 
@@ -281,13 +365,13 @@ print_final_summary() {
 | Open panel: sor                                                  |
 |                                                                  |
 | Quick guide:                                                     |
-| 1. Gateway -> Setup summary                                      |
+| 1. Quick setup -> Show connection guide                          |
 |    Check Base URL and model aliases for plugins                  |
-| 2. Gateway -> API access token and test                          |
+| 2. Gateway access -> Show connection details                     |
 |    Copy MASTER_API_KEY and run the automatic API check           |
 | 3. Providers and keys -> Add provider key (wizard)               |
 |    Add your provider keys before real use                        |
-| 4. Service -> Install diagnostics                                |
+| 4. Diagnostics -> Troubleshooting guide                          |
 |    Verify install path/version if something looks wrong          |
 |                                                                  |
 | Binary: ${BIN_DIR}/sor                                           |
@@ -461,6 +545,7 @@ else
 fi
 
 resolve_python_bin
+ensure_python_venv_available
 
 echo "Using Python runtime: ${PYTHON_BIN}"
 

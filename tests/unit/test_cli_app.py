@@ -62,6 +62,12 @@ def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
 
     assert "SOR_INSTALL_SELF_REEXEC_DONE" in install_script
     assert "maybe_reexec_from_temp_copy" in install_script
+    assert "try_install_supported_python_with_apt" in install_script
+    assert 'apt-get install -y python3 python3-venv' in install_script
+    assert 'for candidate in python3.13 python3.12 python3.11' in install_script
+    assert "ensure_python_venv_available" in install_script
+    assert 'apt-get install -y "python${version}-venv"' in install_script
+    assert '"${PYTHON_BIN}" -c' in install_script
     assert 'exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"' in install_script
 
 
