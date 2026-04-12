@@ -68,6 +68,8 @@ def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
     assert "ensure_python_venv_available" in install_script
     assert 'apt-get install -y "python${version}-venv"' in install_script
     assert '"${PYTHON_BIN}" -c' in install_script
+    assert "import pip" in install_script
+    assert "Existing virtual environment is incomplete or unsupported; recreating" in install_script
     assert 'exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"' in install_script
 
 

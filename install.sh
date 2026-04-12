@@ -620,12 +620,13 @@ echo "Creating virtual environment"
 if [[ -x "${INSTALL_DIR}/.venv/bin/python" ]]; then
   if "${INSTALL_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
 import sys
+import pip
 raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
   then
     echo "Reusing existing virtual environment"
   else
-    echo "Existing virtual environment uses Python < 3.11; recreating"
+    echo "Existing virtual environment is incomplete or unsupported; recreating"
     rm -rf "${INSTALL_DIR}/.venv"
     "${PYTHON_BIN}" -m venv "${INSTALL_DIR}/.venv"
   fi
@@ -635,10 +636,11 @@ fi
 
 if ! "${INSTALL_DIR}/.venv/bin/python" - <<'PY' >/dev/null 2>&1
 import sys
+import pip
 raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
 then
-  echo "Created virtual environment is using Python < 3.11." >&2
+  echo "Created virtual environment is incomplete, missing pip, or using Python < 3.11." >&2
   echo "Remove ${INSTALL_DIR}/.venv and rerun installer with --python <python3.11+ binary>." >&2
   exit 1
 fi
