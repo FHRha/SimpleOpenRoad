@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
+from zipfile import ZipFile
 
 import httpx
 import yaml
@@ -127,6 +130,53 @@ def test_release_build_script_bundles_wheelhouse() -> None:
     assert 'pip wheel --wheel-dir "${STAGE_DIR}/wheelhouse" "${ROOT_DIR}"' in build_script
     assert "Verifying offline wheelhouse" in build_script
     assert "--no-index" in build_script
+
+
+def test_package_includes_storage_schema() -> None:
+    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "[tool.setuptools.package-data]" in pyproject
+    assert '"app.storage" = ["schema.sql"]' in pyproject
+
+
+def test_built_wheel_contains_runtime_files(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    wheel_dir = tmp_path / "wheelhouse"
+    wheel_dir.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            "--no-deps",
+            "--wheel-dir",
+            str(wheel_dir),
+            str(root),
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheels = list(wheel_dir.glob("simple_open_road-*.whl"))
+    assert wheels
+
+    with ZipFile(wheels[0]) as wheel:
+        names = set(wheel.namelist())
+
+    for required in [
+        "app/cli/app.py",
+        "app/container.py",
+        "app/storage/schema.sql",
+        "app/storage/repositories/keys_repo.py",
+        "app/registry/keys.py",
+        "app/router/engine.py",
+        "app/providers/gemini.py",
+        "app/providers/openai_compatible.py",
+    ]:
+        assert required in names
 
 
 def test_cli_config_validate(tmp_path: Path) -> None:

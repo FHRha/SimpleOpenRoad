@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+from importlib.resources import files
 from app.config.runtime import RuntimeConfig
 from app.health.checker import HealthChecker
 from app.health.scheduler import HealthScheduler
@@ -25,7 +24,7 @@ class AppContainer:
 
         db_path = self.runtime_config.get().storage.sqlite_path
         self.db = SQLiteDB(db_path)
-        schema_path = Path(__file__).resolve().parent / "storage" / "schema.sql"
+        schema_path = files("app.storage").joinpath("schema.sql")
         self.db.initialize(str(schema_path))
 
         self.keys_repo = KeysRuntimeRepository(self.db)

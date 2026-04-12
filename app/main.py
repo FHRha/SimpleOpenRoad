@@ -37,7 +37,7 @@ def create_app() -> FastAPI:
         json_logs=container.runtime_config.get().observability.json_logs,
     )
 
-    app = FastAPI(title="SimpleOpenRoad AI Gateway", version="0.1.0", lifespan=app_lifespan)
+    app = FastAPI(title="SimpleOpenRoad AI Gateway", version="0.3.0", lifespan=app_lifespan)
     app.state.container = container
     app.add_middleware(RequestContextMiddleware)
 

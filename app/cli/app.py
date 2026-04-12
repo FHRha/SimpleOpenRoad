@@ -13,6 +13,7 @@ import shutil
 import string
 import sys
 import textwrap
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -309,7 +310,7 @@ def _print_alias_help_table(cfg: GatewayConfig) -> None:
 
 def _runtime_key_registry(cfg: GatewayConfig) -> KeyRegistry:
     db = SQLiteDB(cfg.storage.sqlite_path)
-    schema_path = Path(__file__).resolve().parents[2] / "app" / "storage" / "schema.sql"
+    schema_path = files("app.storage").joinpath("schema.sql")
     db.initialize(str(schema_path))
     registry = KeyRegistry(KeysRuntimeRepository(db))
     registry.sync_defaults(cfg)
