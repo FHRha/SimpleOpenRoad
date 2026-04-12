@@ -14,6 +14,10 @@ from app.providers.base import ProviderAdapter
 
 
 class OpenAICompatibleAdapter(ProviderAdapter):
+    chat_completions_path = "/v1/chat/completions"
+    responses_path = "/v1/responses"
+    models_path = "/v1/models"
+
     def __init__(self, provider_name: str, config: ProviderConfig, extra_headers: dict[str, str] | None = None):
         super().__init__(provider_name=provider_name, config=config)
         self.extra_headers = extra_headers or {}
@@ -26,6 +30,13 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         headers.update(self.config.headers)
         headers.update(self.extra_headers)
         return headers
+
+    def _url(self, path: str) -> str:
+        endpoint = self.config.endpoint.rstrip("/")
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        if endpoint.endswith("/v1") and normalized_path.startswith("/v1/"):
+            normalized_path = normalized_path[3:]
+        return f"{endpoint}{normalized_path}"
 
     def _request_payload(self, request: UnifiedLLMRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -48,7 +59,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
-                    f"{self.config.endpoint.rstrip('/')}{path}",
+                    self._url(path),
                     headers=self._build_headers(key),
                     json=payload,
                 )
@@ -101,11 +112,11 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
     async def chat_completions(self, request: UnifiedLLMRequest, key: KeyConfig) -> dict:
         payload = self._request_payload(request)
-        return await self._post("/v1/chat/completions", payload, key)
+        return await self._post(self.chat_completions_path, payload, key)
 
     async def responses(self, request: UnifiedLLMRequest, key: KeyConfig) -> dict:
         payload = self._request_payload(request)
-        return await self._post("/v1/responses", payload, key)
+        return await self._post(self.responses_path, payload, key)
 
     async def stream_chat_completions(self, request: UnifiedLLMRequest, key: KeyConfig) -> AsyncIterator[bytes]:
         payload = self._request_payload(request)
@@ -117,7 +128,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     async with client.stream(
                         "POST",
-                        f"{self.config.endpoint.rstrip('/')}/v1/chat/completions",
+                        self._url(self.chat_completions_path),
                         headers=self._build_headers(key),
                         json=payload,
                     ) as response:
@@ -188,8 +199,63 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 "error_message": exc.message,
             }
 
+    async def _get(self, path: str, key: KeyConfig) -> dict:
+        timeout = httpx.Timeout(timeout=self.config.timeout_seconds)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.get(
+                    self._url(path),
+                    headers=self._build_headers(key),
+                )
+        except httpx.TimeoutException as exc:
+            raise GatewayError(
+                message=f"Timeout contacting {self.provider_name}",
+                error_class=ErrorClass.NETWORK_TIMEOUT,
+                status_code=504,
+                provider=self.provider_name,
+                key_id=key.id,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise GatewayError(
+                message=f"Network error contacting {self.provider_name}: {exc}",
+                error_class=ErrorClass.PROVIDER_UNAVAILABLE,
+                status_code=503,
+                provider=self.provider_name,
+                key_id=key.id,
+            ) from exc
+
+        if response.status_code >= 400:
+            error_class = ErrorClass.UNKNOWN
+            if response.status_code == 401:
+                error_class = ErrorClass.AUTH_INVALID
+            elif response.status_code == 403:
+                error_class = ErrorClass.AUTH_FORBIDDEN
+            elif response.status_code == 429:
+                error_class = ErrorClass.RATE_LIMIT
+            elif 500 <= response.status_code < 600:
+                error_class = ErrorClass.PROVIDER_UNAVAILABLE
+            body = response.text[:1000]
+            raise GatewayError(
+                message=f"Provider {self.provider_name} returned {response.status_code}: {body}",
+                error_class=error_class,
+                status_code=response.status_code,
+                provider=self.provider_name,
+                key_id=key.id,
+            )
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise GatewayError(
+                message=f"Malformed JSON from {self.provider_name}",
+                error_class=ErrorClass.MALFORMED_RESPONSE,
+                status_code=502,
+                provider=self.provider_name,
+                key_id=key.id,
+            ) from exc
+
     async def list_models(self, key: KeyConfig) -> list[str]:
-        data = await self._post("/v1/models", {}, key)
+        data = await self._get(self.models_path, key)
         items = data.get("data", []) if isinstance(data, dict) else []
         models: list[str] = []
         for item in items:

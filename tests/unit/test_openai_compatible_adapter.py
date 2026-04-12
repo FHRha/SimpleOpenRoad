@@ -18,6 +18,13 @@ def _adapter() -> OpenAICompatibleAdapter:
     )
 
 
+def _adapter_with_v1_endpoint() -> OpenAICompatibleAdapter:
+    return OpenAICompatibleAdapter(
+        provider_name="openrouter",
+        config=ProviderConfig(endpoint="https://openrouter.example/api/v1", keys=[]),
+    )
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_openai_compatible_stream_preserves_sse_event_boundaries() -> None:
@@ -39,3 +46,33 @@ async def test_openai_compatible_stream_preserves_sse_event_boundaries() -> None
     chunks = [chunk.decode("utf-8") async for chunk in iterator]
 
     assert chunks == [f"data: {json.dumps(chunk)}\n\n", "data: [DONE]\n\n"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_does_not_duplicate_v1_for_v1_endpoint() -> None:
+    respx.post("https://openrouter.example/api/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+    )
+
+    result = await _adapter_with_v1_endpoint().chat_completions(
+        UnifiedLLMRequest(model="m1", messages=[ChatMessage(role="user", content="hello")]),
+        KeyConfig(id="openrouter-main", key="secret"),
+    )
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_lists_models_with_get() -> None:
+    respx.get("https://openrouter.example/api/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "openai/gpt-4o-mini"}]})
+    )
+
+    models = await _adapter_with_v1_endpoint().list_models(KeyConfig(id="openrouter-main", key="secret"))
+
+    assert models == ["openai/gpt-4o-mini"]
