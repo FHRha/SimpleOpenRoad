@@ -159,5 +159,8 @@ class KeyRegistry:
     def set_active(self, key_id: str, active: bool) -> None:
         self.runtime_repo.set_active(key_id, active)
 
+    def reset_state(self, provider: str, key_id: str, active: bool) -> None:
+        self.runtime_repo.reset_state(provider=provider, key_id=key_id, active=active)
+
     def bump_switch(self, key_id: str) -> None:
         self.runtime_repo.bump_switch_counter(key_id)

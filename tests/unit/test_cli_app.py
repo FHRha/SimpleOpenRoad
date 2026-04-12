@@ -14,6 +14,37 @@ from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
 from app.cli.app import _service_mode
 from app.cli.app import _service_unit_path
+from app.storage.db import SQLiteDB
+
+
+def _init_key_state(config_path: Path, key_id: str, provider: str) -> None:
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    db = SQLiteDB(data["storage"]["sqlite_path"])
+    schema_path = Path(__file__).resolve().parents[2] / "app" / "storage" / "schema.sql"
+    db.initialize(str(schema_path))
+    with db.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO key_runtime_state (
+              key_id, provider, active, status, consecutive_errors,
+              cooldown_until, last_error_code, last_error_message,
+              success_count, failure_count, switch_count, avg_latency_ms
+            )
+            VALUES (?, ?, 0, 'blocked', 7, '2099-01-01T00:00:00+00:00', 'rate_limit', 'too many', 3, 4, 5, 123.0)
+            ON CONFLICT(key_id) DO UPDATE SET
+              active = 0,
+              status = 'blocked',
+              consecutive_errors = 7,
+              cooldown_until = '2099-01-01T00:00:00+00:00',
+              last_error_code = 'rate_limit',
+              last_error_message = 'too many',
+              success_count = 3,
+              failure_count = 4,
+              switch_count = 5,
+              avg_latency_ms = 123.0
+            """,
+            (key_id, provider),
+        )
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -245,6 +276,34 @@ def test_cli_keys_panel_can_replace_key_value(monkeypatch, tmp_path: Path) -> No
     assert key_cfg["active"] is True
 
 
+def test_cli_keys_panel_can_reset_runtime_state(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    _init_key_state(config_path, key_id="openrouter-main", provider="openrouter")
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="2\n4\n2\n1\n7\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Reset runtime state for key: openrouter-main" in result.stdout
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    db = SQLiteDB(data["storage"]["sqlite_path"])
+    with db.connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM key_runtime_state WHERE key_id = ?",
+            ("openrouter-main",),
+        ).fetchone()
+    assert row["status"] == "unknown"
+    assert row["active"] == 1
+    assert row["consecutive_errors"] == 0
+    assert row["cooldown_until"] is None
+    assert row["last_error_code"] is None
+    assert row["failure_count"] == 0
+
+
 def test_cli_api_access_section_waits_before_back(monkeypatch) -> None:
     runner = CliRunner()
     called: dict[str, bool] = {}
@@ -334,6 +393,23 @@ def test_cli_routes_preview_shows_planned_candidates(tmp_path: Path) -> None:
     assert "Route Preview" in result.stdout
     assert "Candidates" in result.stdout
     assert "github" in result.stdout
+
+
+def test_cli_routes_preview_includes_runtime_key_details(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    _init_key_state(config_path, key_id="github-main", provider="github")
+
+    result = runner.invoke(
+        cli_app,
+        ["routes", "preview", "--model", "auto/fast", "--config-path", str(config_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Runtime status" in result.stdout
+    assert "blocked" in result.stdout
+    assert "rate_limit" in result.stdout
+    assert "2099-01-01T00:00:00+00:00" in result.stdout
 
 
 def test_cli_api_test_prints_candidate_diagnostics(monkeypatch, tmp_path: Path) -> None:

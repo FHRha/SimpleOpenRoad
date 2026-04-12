@@ -325,19 +325,75 @@ def _alias_raw_candidates(cfg: GatewayConfig, model: str) -> list[RouteCandidate
     return [RouteCandidate(provider=provider_name, model=model) for provider_name in cfg.providers]
 
 
-def _candidate_status(cfg: GatewayConfig, registry: KeyRegistry, candidate: RouteCandidate) -> tuple[str, str, int]:
+def _summarize_values(values: list[Any], empty: str = "-") -> str:
+    compact = [str(value) for value in values if value not in (None, "")]
+    if not compact:
+        return empty
+    counts: dict[str, int] = {}
+    for value in compact:
+        counts[value] = counts.get(value, 0) + 1
+    return ", ".join(f"{value}:{count}" if count > 1 else value for value, count in counts.items())
+
+
+def _candidate_runtime_details(
+    cfg: GatewayConfig,
+    registry: KeyRegistry,
+    candidate: RouteCandidate,
+    runtime_map: dict[str, dict],
+) -> dict[str, str]:
     provider = cfg.providers.get(candidate.provider)
     if provider is None:
-        return "skipped", "provider_not_configured", 0
+        return {
+            "status": "skipped",
+            "reason": "provider_not_configured",
+            "config_keys": "0",
+            "available_keys": "0",
+            "runtime_active": "0",
+            "runtime_status": "-",
+            "cooldown": "-",
+            "errors": "0",
+            "last_error": "-",
+        }
     if not provider.enabled:
-        return "skipped", "provider_disabled", 0
+        return {
+            "status": "skipped",
+            "reason": "provider_disabled",
+            "config_keys": str(len(provider.keys)),
+            "available_keys": "0",
+            "runtime_active": "0",
+            "runtime_status": "-",
+            "cooldown": "-",
+            "errors": "0",
+            "last_error": "-",
+        }
+
+    configured_keys = [key for key in provider.keys if is_configured_secret(key.key)]
+    active_configured_keys = [key for key in configured_keys if key.active]
     available_keys = registry.get_available_keys(cfg, candidate.provider)
+    provider_states = [runtime_map.get(key.id, {}) for key in configured_keys]
+    runtime_active = [
+        key
+        for key in active_configured_keys
+        if bool(runtime_map.get(key.id, {}).get("active", 1))
+    ]
+    statuses = _summarize_values([state.get("status", "unknown") for state in provider_states])
+    cooldowns = _summarize_values([state.get("cooldown_until") for state in provider_states])
+    errors = max([int(state.get("consecutive_errors", 0) or 0) for state in provider_states] or [0])
+    last_error = _summarize_values([state.get("last_error_code") for state in provider_states])
+    details = {
+        "config_keys": str(len(configured_keys)),
+        "available_keys": str(len(available_keys)),
+        "runtime_active": str(len(runtime_active)),
+        "runtime_status": statuses,
+        "cooldown": cooldowns,
+        "errors": str(errors),
+        "last_error": last_error,
+    }
     if not available_keys:
-        configured = [key for key in provider.keys if key.active and is_configured_secret(key.key)]
-        if configured:
-            return "skipped", "keys_unhealthy_or_cooling_down", 0
-        return "skipped", "no_active_configured_keys", 0
-    return "ready", "keys_available", len(available_keys)
+        if active_configured_keys:
+            return {"status": "skipped", "reason": "keys_unhealthy_or_cooling_down", **details}
+        return {"status": "skipped", "reason": "no_active_configured_keys", **details}
+    return {"status": "ready", "reason": "keys_available", **details}
 
 
 def _print_candidate_diagnostics(candidates: list[dict]) -> None:
@@ -391,6 +447,7 @@ def _extract_candidate_diagnostics(response: httpx.Response) -> list[dict]:
 def _print_route_preview(config_path: str, model: str | None = None) -> None:
     cfg = load_gateway_config(config_path=config_path)
     registry = _runtime_key_registry(cfg)
+    runtime_map = {item["key_id"]: item for item in registry.runtime_repo.list_states()}
     aliases = list(cfg.routes.aliases)
     if model is None:
         if aliases:
@@ -425,19 +482,59 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
     table.add_column("Order")
     table.add_column("Status")
     table.add_column("Reason")
-    table.add_column("Keys")
+    runtime_table = Table(title="Key Runtime Details", box=box.ASCII)
+    runtime_table.add_column("#")
+    runtime_table.add_column("Provider")
+    runtime_table.add_column("Config")
+    runtime_table.add_column("Available")
+    runtime_table.add_column("Active")
+    runtime_table.add_column("Runtime status")
+    runtime_table.add_column("Cooldown")
+    runtime_table.add_column("Errors")
+    runtime_table.add_column("Last error")
+    runtime_lines: list[str] = []
     for index, candidate in enumerate(raw_candidates, start=1):
-        status, reason, keys = _candidate_status(cfg, registry, candidate)
-        if (candidate.provider, candidate.model) not in planned_keys and status == "ready":
-            status = "filtered"
-            reason = "not_selected_by_route_planner"
+        details = _candidate_runtime_details(cfg, registry, candidate, runtime_map)
+        if (candidate.provider, candidate.model) not in planned_keys and details["status"] == "ready":
+            details["status"] = "filtered"
+            details["reason"] = "not_selected_by_route_planner"
         order = "-"
         for planned_index, planned_candidate in enumerate(planned, start=1):
             if planned_candidate.provider == candidate.provider and planned_candidate.model == candidate.model:
                 order = str(planned_index)
                 break
-        table.add_row(str(index), candidate.provider, candidate.model, order, status, reason, str(keys))
+        table.add_row(
+            str(index),
+            candidate.provider,
+            candidate.model,
+            order,
+            details["status"],
+            details["reason"],
+        )
+        runtime_table.add_row(
+            str(index),
+            candidate.provider,
+            details["config_keys"],
+            details["available_keys"],
+            details["runtime_active"],
+            details["runtime_status"],
+            details["cooldown"],
+            details["errors"],
+            details["last_error"],
+        )
+        runtime_lines.append(
+            "Runtime: "
+            f"#{index} provider={candidate.provider} "
+            f"status={details['runtime_status']} "
+            f"cooldown={details['cooldown']} "
+            f"errors={details['errors']} "
+            f"last_error={details['last_error']}"
+        )
     console.print(table)
+    console.print("Runtime status details")
+    for line in runtime_lines:
+        console.print(line)
+    console.print(runtime_table)
 
 
 def _print_troubleshooting_guide() -> None:
@@ -2256,6 +2353,19 @@ def _replace_selected_provider_key_value(
         keys_validate(provider=provider_name, key_id=str(key_data.get("id")), config_path=config_path)
 
 
+def _reset_selected_provider_key_runtime_state(
+    config_path: str,
+    provider_name: str,
+    key_data: dict[str, Any],
+) -> None:
+    key_id = str(key_data.get("id", ""))
+    if not key_id:
+        raise typer.BadParameter("Key ID cannot be empty")
+    registry = _runtime_key_registry(load_gateway_config(config_path=config_path))
+    registry.reset_state(provider=provider_name, key_id=key_id, active=bool(key_data.get("active", True)))
+    console.print(f"Reset runtime state for key: {key_id}")
+
+
 def _show_selected_provider_key(provider_name: str, key_data: dict[str, Any]) -> None:
     table = Table(title=f"Provider Key: {provider_name}/{key_data.get('id', '<no-id>')}", box=box.ASCII)
     table.add_column("Field")
@@ -2291,6 +2401,7 @@ def _run_selected_key_management_panel(
                 "4) Toggle key active",
                 "5) Rename key ID",
                 "6) Remove key",
+                "7) Reset runtime state",
                 "0) Back",
             ],
         )
@@ -2316,6 +2427,9 @@ def _run_selected_key_management_panel(
                 _remove_selected_provider_key(config_path, provider_name, key_index, key_data)
                 _pause()
                 return
+            elif choice == "7":
+                _reset_selected_provider_key_runtime_state(config_path, provider_name, key_data)
+                _pause()
             elif choice == "0":
                 return
             else:

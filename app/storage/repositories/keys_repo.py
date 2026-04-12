@@ -103,6 +103,31 @@ class KeysRuntimeRepository:
                 (status, key_id),
             )
 
+    def reset_state(self, provider: str, key_id: str, active: bool) -> None:
+        with self.db.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO key_runtime_state (key_id, provider, active)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key_id) DO UPDATE SET
+                  provider = excluded.provider,
+                  active = excluded.active,
+                  status = 'unknown',
+                  consecutive_errors = 0,
+                  cooldown_until = NULL,
+                  last_check_at = NULL,
+                  last_success_at = NULL,
+                  last_error_at = NULL,
+                  last_error_code = NULL,
+                  last_error_message = NULL,
+                  success_count = 0,
+                  failure_count = 0,
+                  switch_count = 0,
+                  avg_latency_ms = 0
+                """,
+                (key_id, provider, 1 if active else 0),
+            )
+
     def update_health(
         self,
         key_id: str,
