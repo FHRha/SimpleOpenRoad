@@ -40,6 +40,16 @@ cp "${ROOT_DIR}/config/config.example.yaml" "${STAGE_DIR}/config/config.example.
 echo "Building offline wheelhouse"
 "${PYTHON_BIN}" -m pip wheel --wheel-dir "${STAGE_DIR}/wheelhouse" "${ROOT_DIR}"
 
+echo "Verifying offline wheelhouse"
+VERIFY_VENV="${DIST_DIR}/.verify-${RELEASE_NAME}"
+rm -rf "${VERIFY_VENV}"
+"${PYTHON_BIN}" -m venv "${VERIFY_VENV}"
+"${VERIFY_VENV}/bin/python" -m pip install \
+  --no-index \
+  --find-links "${STAGE_DIR}/wheelhouse" \
+  simple-open-road
+rm -rf "${VERIFY_VENV}"
+
 cat > "${STAGE_DIR}/VERSION" <<EOF
 ${VERSION}
 EOF

@@ -110,6 +110,7 @@ def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
     assert "Installing package from bundled wheelhouse" in install_script
     assert "--no-index" in install_script
     assert "--find-links" in install_script
+    assert "Bundled wheelhouse is incomplete or incompatible; retrying with PyPI" in install_script
     assert "Bundled wheelhouse not found; installing dependencies from PyPI" in install_script
     assert "--prefer-binary -e" in install_script
     assert 'exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"' in install_script
@@ -122,6 +123,8 @@ def test_release_build_script_bundles_wheelhouse() -> None:
 
     assert "Building offline wheelhouse" in build_script
     assert 'pip wheel --wheel-dir "${STAGE_DIR}/wheelhouse" "${ROOT_DIR}"' in build_script
+    assert "Verifying offline wheelhouse" in build_script
+    assert "--no-index" in build_script
 
 
 def test_cli_config_validate(tmp_path: Path) -> None:

@@ -692,12 +692,22 @@ export PIP_NO_INPUT=1
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 if [[ -d "${INSTALL_DIR}/wheelhouse" ]]; then
   echo "Installing package from bundled wheelhouse"
-  "${INSTALL_DIR}/.venv/bin/python" -m pip install \
+  if ! "${INSTALL_DIR}/.venv/bin/python" -m pip install \
     --no-index \
     --find-links "${INSTALL_DIR}/wheelhouse" \
     --upgrade \
     --force-reinstall \
-    simple-open-road
+    simple-open-road; then
+    echo "Bundled wheelhouse is incomplete or incompatible; retrying with PyPI"
+    "${INSTALL_DIR}/.venv/bin/python" -m pip install \
+      --retries 3 \
+      --timeout 60 \
+      --prefer-binary \
+      --find-links "${INSTALL_DIR}/wheelhouse" \
+      --upgrade \
+      --force-reinstall \
+      simple-open-road
+  fi
 else
   echo "Bundled wheelhouse not found; installing dependencies from PyPI"
   "${INSTALL_DIR}/.venv/bin/python" -m pip install --retries 3 --timeout 60 --prefer-binary -e "${INSTALL_DIR}"
