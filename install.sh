@@ -320,6 +320,15 @@ if isinstance(payload, list):
 ' "$channel"
 }
 
+wheelhouse_can_install() {
+  local wheelhouse_dir="$1"
+  "${INSTALL_DIR}/.venv/bin/python" -m pip install \
+    --dry-run \
+    --no-index \
+    --find-links "${wheelhouse_dir}" \
+    simple-open-road >/dev/null 2>&1
+}
+
 prompt_release_channel() {
   local selected="stable"
   if [[ -t 0 ]]; then
@@ -586,13 +595,6 @@ else
   ARCH="$(detect_arch)"
 fi
 
-resolve_python_bin
-ensure_python_venv_available
-
-echo "Using Python runtime: ${PYTHON_BIN}"
-
-maybe_reexec_from_temp_copy
-
 if [[ -n "${TAG}" && -n "${SOURCE_REF}" ]]; then
   echo "Use either --version or --ref, not both." >&2
   exit 1
@@ -601,6 +603,13 @@ fi
 if [[ -z "${TAG}" && -z "${SOURCE_REF}" && "${RELEASE_CHANNEL_EXPLICIT}" -eq 0 ]]; then
   RELEASE_CHANNEL="$(prompt_release_channel)"
 fi
+
+resolve_python_bin
+ensure_python_venv_available
+
+echo "Using Python runtime: ${PYTHON_BIN}"
+
+maybe_reexec_from_temp_copy
 
 if [[ -z "${TAG}" && -z "${SOURCE_REF}" ]]; then
   TAG="$(resolve_release_tag "${RELEASE_CHANNEL}" || true)"
@@ -691,14 +700,16 @@ echo "Installing SimpleOpenRoad"
 export PIP_NO_INPUT=1
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 if [[ -d "${INSTALL_DIR}/wheelhouse" ]]; then
-  echo "Installing package from bundled wheelhouse"
-  if ! "${INSTALL_DIR}/.venv/bin/python" -m pip install \
-    --no-index \
-    --find-links "${INSTALL_DIR}/wheelhouse" \
-    --upgrade \
-    --force-reinstall \
-    simple-open-road; then
-    echo "Bundled wheelhouse is incomplete or incompatible; retrying with PyPI"
+  if wheelhouse_can_install "${INSTALL_DIR}/wheelhouse"; then
+    echo "Installing package from bundled wheelhouse"
+    "${INSTALL_DIR}/.venv/bin/python" -m pip install \
+      --no-index \
+      --find-links "${INSTALL_DIR}/wheelhouse" \
+      --upgrade \
+      --force-reinstall \
+      simple-open-road
+  else
+    echo "Bundled wheelhouse is incomplete or incompatible; installing with PyPI fallback"
     "${INSTALL_DIR}/.venv/bin/python" -m pip install \
       --retries 3 \
       --timeout 60 \

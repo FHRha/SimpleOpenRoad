@@ -110,7 +110,9 @@ def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
     assert "Installing package from bundled wheelhouse" in install_script
     assert "--no-index" in install_script
     assert "--find-links" in install_script
-    assert "Bundled wheelhouse is incomplete or incompatible; retrying with PyPI" in install_script
+    assert "wheelhouse_can_install" in install_script
+    assert "--dry-run" in install_script
+    assert "Bundled wheelhouse is incomplete or incompatible; installing with PyPI fallback" in install_script
     assert "Bundled wheelhouse not found; installing dependencies from PyPI" in install_script
     assert "--prefer-binary -e" in install_script
     assert 'exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"' in install_script
