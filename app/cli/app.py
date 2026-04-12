@@ -32,7 +32,12 @@ from app.config.models import GatewayConfig
 from app.container import AppContainer
 from app.core.errors import ConfigError
 from app.core.security import is_configured_secret
+from app.core.types import ChatMessage, RouteCandidate, UnifiedLLMRequest
 from app.core.utils import mask_secret
+from app.registry.keys import KeyRegistry
+from app.router.model_planner import classify_request_profile, plan_candidates
+from app.storage.db import SQLiteDB
+from app.storage.repositories.keys_repo import KeysRuntimeRepository
 
 cli_app = typer.Typer(
     help="SimpleOpenRoad AI gateway CLI",
@@ -302,6 +307,228 @@ def _print_alias_help_table(cfg: GatewayConfig) -> None:
     console.print(table)
 
 
+def _runtime_key_registry(cfg: GatewayConfig) -> KeyRegistry:
+    db = SQLiteDB(cfg.storage.sqlite_path)
+    schema_path = Path(__file__).resolve().parents[2] / "app" / "storage" / "schema.sql"
+    db.initialize(str(schema_path))
+    registry = KeyRegistry(KeysRuntimeRepository(db))
+    registry.sync_defaults(cfg)
+    return registry
+
+
+def _alias_raw_candidates(cfg: GatewayConfig, model: str) -> list[RouteCandidate]:
+    if model in cfg.routes.aliases:
+        return [RouteCandidate(provider=c.provider, model=c.model) for c in cfg.routes.aliases[model].candidates]
+    if "/" in model:
+        provider, model_name = model.split("/", 1)
+        return [RouteCandidate(provider=provider, model=model_name)]
+    return [RouteCandidate(provider=provider_name, model=model) for provider_name in cfg.providers]
+
+
+def _candidate_status(cfg: GatewayConfig, registry: KeyRegistry, candidate: RouteCandidate) -> tuple[str, str, int]:
+    provider = cfg.providers.get(candidate.provider)
+    if provider is None:
+        return "skipped", "provider_not_configured", 0
+    if not provider.enabled:
+        return "skipped", "provider_disabled", 0
+    available_keys = registry.get_available_keys(cfg, candidate.provider)
+    if not available_keys:
+        configured = [key for key in provider.keys if key.active and is_configured_secret(key.key)]
+        if configured:
+            return "skipped", "keys_unhealthy_or_cooling_down", 0
+        return "skipped", "no_active_configured_keys", 0
+    return "ready", "keys_available", len(available_keys)
+
+
+def _print_candidate_diagnostics(candidates: list[dict]) -> None:
+    if not candidates:
+        return
+    table = Table(title="Route Candidate Diagnostics", box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Status")
+    table.add_column("Reason")
+    table.add_column("Keys")
+    for index, item in enumerate(candidates, start=1):
+        table.add_row(
+            str(index),
+            str(item.get("provider", "")),
+            str(item.get("model", "")),
+            str(item.get("status", "")),
+            str(item.get("reason", "")),
+            str(item.get("available_keys", "")),
+        )
+    console.print(table)
+
+
+def _extract_error_detail(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    detail = payload.get("detail")
+    if not isinstance(detail, dict):
+        return {}
+    return detail
+
+
+def _extract_candidate_diagnostics(response: httpx.Response) -> list[dict]:
+    detail = _extract_error_detail(response)
+    if not detail:
+        return []
+    details = detail.get("details")
+    if not isinstance(details, dict):
+        return []
+    candidates = details.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    return [item for item in candidates if isinstance(item, dict)]
+
+
+def _print_route_preview(config_path: str, model: str | None = None) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    registry = _runtime_key_registry(cfg)
+    aliases = list(cfg.routes.aliases)
+    if model is None:
+        if aliases:
+            _print_numbered_items("Route aliases", aliases)
+            selected = _prompt_numbered_choice(len(aliases), "Alias number")
+            model = aliases[selected - 1]
+        else:
+            model = typer.prompt("Model or alias", default="auto/fast").strip()
+
+    request = UnifiedLLMRequest(
+        model=model,
+        messages=[ChatMessage(role="user", content="hello")],
+        metadata={"sor_profile": "fast"},
+    )
+    planned, alias = plan_candidates(cfg, request)
+    raw_candidates = _alias_raw_candidates(cfg, model)
+    planned_keys = {(candidate.provider, candidate.model) for candidate in planned}
+
+    summary = Table(title="Route Preview", box=box.ASCII)
+    summary.add_column("Field")
+    summary.add_column("Value")
+    summary.add_row("Requested model", model)
+    summary.add_row("Resolved alias", alias or "<direct model>")
+    summary.add_row("Estimated profile", classify_request_profile(request))
+    summary.add_row("Planned candidates", str(len(planned)))
+    console.print(summary)
+
+    table = Table(title="Candidates", box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Provider")
+    table.add_column("Model")
+    table.add_column("Order")
+    table.add_column("Status")
+    table.add_column("Reason")
+    table.add_column("Keys")
+    for index, candidate in enumerate(raw_candidates, start=1):
+        status, reason, keys = _candidate_status(cfg, registry, candidate)
+        if (candidate.provider, candidate.model) not in planned_keys and status == "ready":
+            status = "filtered"
+            reason = "not_selected_by_route_planner"
+        order = "-"
+        for planned_index, planned_candidate in enumerate(planned, start=1):
+            if planned_candidate.provider == candidate.provider and planned_candidate.model == candidate.model:
+                order = str(planned_index)
+                break
+        table.add_row(str(index), candidate.provider, candidate.model, order, status, reason, str(keys))
+    console.print(table)
+
+
+def _print_troubleshooting_guide() -> None:
+    table = Table(title="SimpleOpenRoad Troubleshooting", box=box.ASCII)
+    table.add_column("Symptom")
+    table.add_column("Meaning")
+    table.add_column("Action")
+    table.add_row(
+        "401 Unauthorized",
+        "Client is not sending the current MASTER_API_KEY.",
+        "Open Gateway -> API access token and test, copy x-api-key or Bearer token, then retry.",
+    )
+    table.add_row(
+        "422 Unprocessable Entity",
+        "Client sent a payload outside the OpenAI-compatible shape accepted by SOR.",
+        "Update SOR, check /v1 base URL, and retry with chat/completions compatible fields.",
+    )
+    table.add_row(
+        "429 Too Many Requests",
+        "Provider or key is rate limited.",
+        "Wait for cooldown, add another key, or use Route preview to move to a less limited route.",
+    )
+    table.add_row(
+        "503 No healthy route candidates",
+        "All candidates were filtered, cooling down, disabled, invalid, or unsupported.",
+        "Run Route preview, validate keys, enable provider/key, or adjust the alias chain.",
+    )
+    table.add_row(
+        "Invalid/empty API response",
+        "Provider returned no assistant content/tool calls, malformed SSE, or an unusable final message.",
+        "Use a stronger/tool-capable alias for agents, check runtime logs, and keep fallback candidates in the alias.",
+    )
+    table.add_row(
+        "Client works in /v1/models but not chat",
+        "Auth and base URL are OK, routing/provider execution is failing.",
+        "Run automatic API test and Route preview; inspect provider/key status and candidate diagnostics.",
+    )
+    console.print(table)
+
+
+def _print_openai_client_examples(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    api_base = _resolve_api_base_url(cfg)
+    openai_base = f"{api_base}/v1"
+    model = _recommended_model_alias(cfg)
+    table = Table(title="OpenAI-Compatible Client Setup", box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Base URL", openai_base)
+    table.add_row("API key", "MASTER_API_KEY from .env")
+    table.add_row("Auth header", "Authorization: Bearer <MASTER_API_KEY>")
+    table.add_row("Alternative header", "x-api-key: <MASTER_API_KEY>")
+    table.add_row("Recommended model", model)
+    table.add_row("Other aliases", _format_model_aliases(cfg))
+    console.print(table)
+    console.print("For Cline/OpenAI-compatible clients, use the Base URL with /v1 and one of the auto/... aliases.")
+
+
+def _print_quick_status(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    configured_keys = [
+        key
+        for provider in cfg.providers.values()
+        for key in provider.keys
+        if key.active and is_configured_secret(key.key)
+    ]
+    enabled_providers = [name for name, provider in cfg.providers.items() if provider.enabled]
+    table = Table(title="SimpleOpenRoad Quick Status", box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Config", config_path)
+    table.add_row("Local gateway", _resolve_local_api_base_url(cfg))
+    table.add_row("Public/OpenAI base", f"{_resolve_api_base_url(cfg)}/v1")
+    table.add_row("Enabled providers", str(len(enabled_providers)))
+    table.add_row("Active configured keys", str(len(configured_keys)))
+    table.add_row("Aliases", _format_model_aliases(cfg))
+    table.add_row("Recommended model", _recommended_model_alias(cfg))
+    console.print(table)
+
+
+def _run_setup_wizard(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    _print_setup_summary(config_path=config_path, cfg=cfg)
+    if typer.confirm("Add provider key now", default=False):
+        _interactive_add_provider_key(config_path=config_path)
+    if typer.confirm("Restart system service now", default=False):
+        service_restart(mode="system")
+    if typer.confirm("Run automatic API test now", default=True):
+        _test_api_request(config_path=config_path)
+
+
 def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     api_base = _resolve_api_base_url(cfg)
     openai_base = f"{api_base}/v1"
@@ -375,13 +602,13 @@ def _regenerate_master_api_key(restart_service: bool = False) -> str:
     return new_token
 
 
-def _test_api_request(config_path: str) -> None:
+def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
     cfg = load_gateway_config(config_path=config_path)
     token = _current_master_api_key()
     api_base = _resolve_local_api_base_url(cfg)
     url = f"{api_base}/v1/chat/completions"
     payload = {
-        "model": "auto/fast",
+        "model": model,
         "messages": [{"role": "user", "content": "hello"}],
     }
     headers = {"Content-Type": "application/json"}
@@ -392,7 +619,7 @@ def _test_api_request(config_path: str) -> None:
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("URL", url)
-    table.add_row("Model", "auto/fast")
+    table.add_row("Model", model)
     table.add_row("Auth", "x-api-key" if cfg.security.require_master_key else "disabled")
     try:
         response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
@@ -407,11 +634,25 @@ def _test_api_request(config_path: str) -> None:
             table.add_row("Response", text[:300] or "<empty>")
         else:
             table.add_row("Result", "failed")
-            table.add_row("Response", response.text[:500])
+            detail = _extract_error_detail(response)
+            message = str(detail.get("message") or response.text[:500] or "<empty>")
+            error_type = str(detail.get("type") or "<unknown>")
+            table.add_row("Error type", error_type)
+            table.add_row("Message", message[:500])
+            if detail.get("provider") or detail.get("key_id"):
+                table.add_row("Provider", str(detail.get("provider") or "<none>"))
+                table.add_row("Key ID", str(detail.get("key_id") or "<none>"))
+            candidates = _extract_candidate_diagnostics(response)
+            if candidates:
+                table.add_row("Diagnostics", "see Route Candidate Diagnostics below")
+            elif response.text:
+                table.add_row("Response", response.text[:500])
     except Exception as exc:  # noqa: BLE001
         table.add_row("Result", "failed")
         table.add_row("Error", str(exc))
     console.print(table)
+    if "response" in locals() and response.status_code != 200:
+        _print_candidate_diagnostics(_extract_candidate_diagnostics(response))
 
 
 def _generate_api_key(length: int = 40) -> str:
@@ -1224,6 +1465,14 @@ def routes_list(config_path: str = typer.Option("config/config.yaml", help="Path
     console.print(table)
 
 
+@routes_app.command("preview")
+def routes_preview(
+    model: str | None = typer.Option(None, help="Alias or direct model to preview"),
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+) -> None:
+    _print_route_preview(config_path=config_path, model=model)
+
+
 @routes_app.command("set-priority")
 def routes_set_priority(
     alias: str = typer.Option(..., help="Alias to edit"),
@@ -1795,6 +2044,15 @@ def _run_provider_key_settings_panel(config_path: str, provider_name: str) -> No
         _pause()
         return
 
+    _run_provider_key_settings_for_selected(config_path, provider_name, key_index, key_data)
+
+
+def _run_provider_key_settings_for_selected(
+    config_path: str,
+    provider_name: str,
+    key_index: int,
+    key_data: dict[str, Any],
+) -> None:
     key_id = str(key_data.get("id", "<no-id>"))
     while True:
         _print_menu(
@@ -1911,6 +2169,15 @@ def _remove_provider_key_by_number(config_path: str) -> None:
     if key_data is None or key_index is None or provider_name is None:
         console.print("No key selected")
         return
+    _remove_selected_provider_key(config_path, provider_name, key_index, key_data)
+
+
+def _remove_selected_provider_key(
+    config_path: str,
+    provider_name: str,
+    key_index: int,
+    key_data: dict[str, Any],
+) -> None:
     if not typer.confirm(f"Remove key '{key_data.get('id')}' from config", default=False):
         console.print("Removal cancelled")
         return
@@ -1930,6 +2197,15 @@ def _toggle_provider_key_active(config_path: str) -> None:
     if key_data is None or key_index is None or provider_name is None:
         console.print("No key selected")
         return
+    _toggle_selected_provider_key_active(config_path, provider_name, key_index, key_data)
+
+
+def _toggle_selected_provider_key_active(
+    config_path: str,
+    provider_name: str,
+    key_index: int,
+    key_data: dict[str, Any],
+) -> None:
     current = bool(key_data.get("active", True))
     key_data["active"] = not current
     _update_provider_key(config_path, provider_name, key_index, key_data)
@@ -1941,6 +2217,15 @@ def _rename_provider_key_id(config_path: str) -> None:
     if key_data is None or key_index is None or provider_name is None:
         console.print("No key selected")
         return
+    _rename_selected_provider_key_id(config_path, provider_name, key_index, key_data)
+
+
+def _rename_selected_provider_key_id(
+    config_path: str,
+    provider_name: str,
+    key_index: int,
+    key_data: dict[str, Any],
+) -> None:
     current_id = str(key_data.get("id", ""))
     new_id = typer.prompt("New key ID", default=current_id).strip()
     if not new_id:
@@ -1952,6 +2237,101 @@ def _rename_provider_key_id(config_path: str) -> None:
     key_data["id"] = new_id
     _update_provider_key(config_path, provider_name, key_index, key_data)
     console.print(f"Renamed key: {current_id} -> {new_id}")
+
+
+def _replace_selected_provider_key_value(
+    config_path: str,
+    provider_name: str,
+    key_index: int,
+    key_data: dict[str, Any],
+) -> None:
+    secret = typer.prompt("New API key", hide_input=True, confirmation_prompt=True).strip()
+    if not secret:
+        raise typer.BadParameter("API key cannot be empty")
+    key_data["key"] = secret
+    key_data["active"] = True
+    _update_provider_key(config_path, provider_name, key_index, key_data)
+    console.print(f"Replaced API key value for {key_data.get('id')}: {mask_secret(secret)}")
+    if typer.confirm("Validate key now", default=True):
+        keys_validate(provider=provider_name, key_id=str(key_data.get("id")), config_path=config_path)
+
+
+def _show_selected_provider_key(provider_name: str, key_data: dict[str, Any]) -> None:
+    table = Table(title=f"Provider Key: {provider_name}/{key_data.get('id', '<no-id>')}", box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("id", str(key_data.get("id", "")))
+    table.add_row("configured", "yes" if is_configured_secret(str(key_data.get("key", ""))) else "no")
+    table.add_row("active", str(key_data.get("active", True)))
+    table.add_row("priority", str(key_data.get("priority", 100)))
+    table.add_row("max_retries", str(key_data.get("max_retries", 1)))
+    table.add_row("max_consecutive_errors", str(key_data.get("max_consecutive_errors", 5)))
+    cooldown = key_data.get("cooldown", {})
+    if isinstance(cooldown, dict):
+        table.add_row("cooldown.rate_limit_seconds", str(cooldown.get("rate_limit_seconds", 30)))
+        table.add_row("cooldown.error_seconds", str(cooldown.get("error_seconds", 15)))
+    console.print(table)
+
+
+def _run_selected_key_management_panel(
+    config_path: str,
+    provider_name: str,
+    key_index: int,
+    key_data: dict[str, Any],
+) -> None:
+    while True:
+        current_id = str(key_data.get("id", "<no-id>"))
+        _print_menu(
+            title=f"SimpleOpenRoad / Providers and Keys / {provider_name} / {current_id}",
+            config_path=config_path,
+            lines=[
+                "1) Show selected key",
+                "2) Replace API key value",
+                "3) Edit retry, priority and cooldown",
+                "4) Toggle key active",
+                "5) Rename key ID",
+                "6) Remove key",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _show_selected_provider_key(provider_name, key_data)
+                _pause()
+            elif choice == "2":
+                _replace_selected_provider_key_value(config_path, provider_name, key_index, key_data)
+                _pause()
+            elif choice == "3":
+                _run_provider_key_settings_for_selected(config_path, provider_name, key_index, key_data)
+                return
+            elif choice == "4":
+                _toggle_selected_provider_key_active(config_path, provider_name, key_index, key_data)
+                _pause()
+            elif choice == "5":
+                _rename_selected_provider_key_id(config_path, provider_name, key_index, key_data)
+                key_data = _load_yaml(_config_path(config_path))["providers"][provider_name]["keys"][key_index]
+                _pause()
+            elif choice == "6":
+                _remove_selected_provider_key(config_path, provider_name, key_index, key_data)
+                _pause()
+                return
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_manage_existing_key_panel(config_path: str) -> None:
+    provider_name, key_index, key_data = _select_provider_and_key(config_path)
+    if key_data is None or key_index is None or provider_name is None:
+        console.print("No key selected")
+        return
+    _run_selected_key_management_panel(config_path, provider_name, key_index, key_data)
 
 
 def _add_alias_candidate(config_path: str, alias_name: str) -> None:
@@ -2192,8 +2572,10 @@ def _run_gateway_panel(config_path: str) -> None:
             lines=[
                 "1) Setup summary (API URL)",
                 "2) API access token and test",
-                "3) Doctor report",
-                "4) Show runtime stats",
+                "3) Route preview",
+                "4) Doctor report",
+                "5) Show runtime stats",
+                "6) Troubleshooting guide",
                 "0) Back",
             ],
         )
@@ -2206,10 +2588,16 @@ def _run_gateway_panel(config_path: str) -> None:
             elif choice == "2":
                 _run_api_access_panel(config_path=config_path)
             elif choice == "3":
-                doctor(config_path=config_path)
+                _print_route_preview(config_path=config_path)
                 _pause()
             elif choice == "4":
+                doctor(config_path=config_path)
+                _pause()
+            elif choice == "5":
                 stats(config_path=config_path)
+                _pause()
+            elif choice == "6":
+                _print_troubleshooting_guide()
                 _pause()
             elif choice == "0":
                 return
@@ -2224,12 +2612,13 @@ def _run_gateway_panel(config_path: str) -> None:
 def _run_api_access_panel(config_path: str) -> None:
     while True:
         _print_menu(
-            title="SimpleOpenRoad / API Access",
+            title="SimpleOpenRoad / Gateway Access",
             config_path=config_path,
             lines=[
-                "1) Show API access token",
+                "1) Show connection details",
                 "2) Regenerate API access token",
                 "3) Test API request automatically",
+                "4) Show OpenAI-compatible examples",
                 "0) Back",
             ],
         )
@@ -2244,6 +2633,198 @@ def _run_api_access_panel(config_path: str) -> None:
                 _pause()
             elif choice == "3":
                 _test_api_request(config_path=config_path)
+                _pause()
+            elif choice == "4":
+                _print_openai_client_examples(config_path=config_path)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_quick_setup_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Quick Setup",
+            config_path=config_path,
+            lines=[
+                "1) Show connection guide",
+                "2) Run setup wizard",
+                "3) Test gateway now",
+                "4) Show current status",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                cfg = load_gateway_config(config_path=config_path)
+                _print_setup_summary(config_path=config_path, cfg=cfg)
+                _pause()
+            elif choice == "2":
+                _run_setup_wizard(config_path=config_path)
+                _pause()
+            elif choice == "3":
+                _test_api_request(config_path=config_path)
+                _pause()
+            elif choice == "4":
+                _print_quick_status(config_path=config_path)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_route_preview_panel(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    alias_options = [alias for alias in ("auto/fast", "auto/smart", "auto/code") if alias in cfg.routes.aliases]
+    while True:
+        lines = [f"{index}) Preview {alias}" for index, alias in enumerate(alias_options, start=1)]
+        custom_option = len(alias_options) + 1
+        lines.extend([f"{custom_option}) Preview custom model or alias", "0) Back"])
+        _print_menu(
+            title="SimpleOpenRoad / Routing and Models / Route Preview",
+            config_path=config_path,
+            lines=lines,
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "0":
+                return
+            selected = int(choice)
+            if 1 <= selected <= len(alias_options):
+                _print_route_preview(config_path=config_path, model=alias_options[selected - 1])
+                _pause()
+            elif selected == custom_option:
+                model = typer.prompt("Model or alias", default=_recommended_model_alias(cfg)).strip()
+                _print_route_preview(config_path=config_path, model=model)
+                _pause()
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_routing_models_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Routing and Models",
+            config_path=config_path,
+            lines=[
+                "1) Route preview",
+                "2) Show model aliases",
+                "3) Edit alias chains",
+                "4) Edit model capabilities",
+                "5) Test selected route",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _run_route_preview_panel(config_path=config_path)
+            elif choice == "2":
+                cfg = load_gateway_config(config_path=config_path)
+                _print_alias_help_table(cfg)
+                routes_list(config_path=config_path)
+                _pause()
+            elif choice == "3":
+                _run_alias_settings_panel(config_path=config_path)
+            elif choice == "4":
+                _run_capabilities_panel(config_path=config_path)
+            elif choice == "5":
+                cfg = load_gateway_config(config_path=config_path)
+                model = typer.prompt("Model or alias", default=_recommended_model_alias(cfg)).strip()
+                _test_api_request(config_path=config_path, model=model)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_diagnostics_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Diagnostics",
+            config_path=config_path,
+            lines=[
+                "1) Doctor report",
+                "2) Automatic API test",
+                "3) Route preview",
+                "4) Show runtime stats",
+                "5) Show service logs",
+                "6) Troubleshooting guide",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                doctor(config_path=config_path)
+                _pause()
+            elif choice == "2":
+                _test_api_request(config_path=config_path)
+                _pause()
+            elif choice == "3":
+                _run_route_preview_panel(config_path=config_path)
+            elif choice == "4":
+                stats(config_path=config_path)
+                _pause()
+            elif choice == "5":
+                service_logs(mode="system", lines=100)
+                _pause()
+            elif choice == "6":
+                _print_troubleshooting_guide()
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_keys_view_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Providers and Keys / View",
+            config_path=config_path,
+            lines=[
+                "1) List providers",
+                "2) List configured keys",
+                "3) List all keys including placeholders",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                providers_list(config_path=config_path)
+                _pause()
+            elif choice == "2":
+                keys_list(config_path=config_path, all_keys=False)
+                _pause()
+            elif choice == "3":
+                keys_list(config_path=config_path, all_keys=True)
                 _pause()
             elif choice == "0":
                 return
@@ -2261,52 +2842,29 @@ def _run_keys_panel(config_path: str) -> None:
             title="SimpleOpenRoad / Providers and Keys",
             config_path=config_path,
             lines=[
-                "1) List providers",
-                "2) Add provider key (wizard)",
-                "3) List keys",
-                "4) List keys including placeholders",
-                "5) Validate all keys",
-                "6) Edit key settings",
-                "7) Clean unconfigured placeholder keys",
-                "8) Toggle key active",
-                "9) Rename key ID",
-                "10) Remove provider key",
+                "1) Add provider key (wizard)",
+                "2) View providers and keys",
+                "3) Validate keys",
+                "4) Manage existing key",
+                "5) Clean unconfigured placeholder keys",
                 "0) Back",
             ],
         )
         choice = _prompt_menu_choice()
         try:
             if choice == "1":
-                providers_list(config_path=config_path)
-                _pause()
-            elif choice == "2":
                 _interactive_add_provider_key(config_path=config_path)
                 _pause()
+            elif choice == "2":
+                _run_keys_view_panel(config_path=config_path)
             elif choice == "3":
-                keys_list(config_path=config_path, all_keys=False)
-                _pause()
-            elif choice == "4":
-                keys_list(config_path=config_path, all_keys=True)
-                _pause()
-            elif choice == "5":
                 keys_validate(provider=None, key_id=None, config_path=config_path)
                 _pause()
-            elif choice == "6":
-                provider_name = _select_provider_name(config_path)
-                _run_provider_key_settings_panel(config_path, provider_name)
-                _pause()
-            elif choice == "7":
+            elif choice == "4":
+                _run_manage_existing_key_panel(config_path=config_path)
+            elif choice == "5":
                 removed = _remove_unconfigured_provider_keys(config_path=config_path)
                 console.print(f"Removed unconfigured placeholder keys: {removed}")
-                _pause()
-            elif choice == "8":
-                _toggle_provider_key_active(config_path=config_path)
-                _pause()
-            elif choice == "9":
-                _rename_provider_key_id(config_path=config_path)
-                _pause()
-            elif choice == "10":
-                _remove_provider_key_by_number(config_path=config_path)
                 _pause()
             elif choice == "0":
                 return
@@ -2321,53 +2879,126 @@ def _run_keys_panel(config_path: str) -> None:
 def _run_service_panel(config_path: str) -> None:
     while True:
         _print_menu(
-            title="SimpleOpenRoad / Service",
+            title="SimpleOpenRoad / Service and Updates",
             config_path=config_path,
             lines=[
-                "1) Update latest release",
-                "2) Update from main branch (dev/unreleased)",
-                "3) Install diagnostics",
-                "4) Install system service",
-                "5) Start service",
-                "6) Stop service",
-                "7) Restart service",
-                "8) Service status",
-                "9) Show service logs",
+                "1) Service status",
+                "2) Start service",
+                "3) Restart service",
+                "4) Stop service",
+                "5) Update SimpleOpenRoad",
+                "6) Install or repair service",
+                "7) Install diagnostics",
+                "8) Uninstall",
+                "9) Advanced settings",
                 "0) Back",
             ],
         )
         choice = _prompt_menu_choice()
         try:
             if choice == "1":
-                release_channel = _prompt_release_channel(default="stable")
-                _run_update(config_path=config_path, channel=release_channel, yes=False)
-                _pause()
-            elif choice == "2":
-                _run_update(config_path=config_path, ref="main", yes=False)
-                _pause()
-            elif choice == "3":
-                _print_install_diagnostics(config_path=config_path)
-                _pause()
-            elif choice == "4":
-                service_install(config_path=config_path, mode="system", run_as=None, start=True)
-                _pause()
-            elif choice == "5":
-                service_start(mode="system")
-                _pause()
-            elif choice == "6":
-                service_stop(mode="system")
-                _pause()
-            elif choice == "7":
-                service_restart(mode="system")
-                _pause()
-            elif choice == "8":
                 service_status(mode="system")
                 _pause()
+            elif choice == "2":
+                service_start(mode="system")
+                _pause()
+            elif choice == "3":
+                service_restart(mode="system")
+                _pause()
+            elif choice == "4":
+                service_stop(mode="system")
+                _pause()
+            elif choice == "5":
+                _run_update_panel(config_path=config_path)
+            elif choice == "6":
+                service_install(config_path=config_path, mode="system", run_as=None, start=True)
+                _pause()
+            elif choice == "7":
+                _print_install_diagnostics(config_path=config_path)
+                _pause()
+            elif choice == "8":
+                if _run_uninstall_panel(config_path=config_path):
+                    return
             elif choice == "9":
-                service_logs(mode="system", lines=100)
+                _run_settings_panel(config_path=config_path)
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_update_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Service and Updates / Update",
+            config_path=config_path,
+            lines=[
+                "1) Update to latest stable",
+                "2) Update to latest prerelease",
+                "3) Reinstall current version",
+                "4) Update from main branch",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _run_update(config_path=config_path, channel="stable", yes=False)
+                _pause()
+            elif choice == "2":
+                _run_update(config_path=config_path, channel="prerelease", yes=False)
+                _pause()
+            elif choice == "3":
+                install_root = _detect_wrapper_install_root() or _guess_install_root(config_path)
+                current_version = _read_installed_version(install_root)
+                if current_version == "unknown":
+                    console.print("Current installed version is unknown. Use latest stable or prerelease instead.")
+                else:
+                    _run_update(
+                        config_path=config_path,
+                        version=f"v{current_version.lstrip('v')}",
+                        install_dir=str(install_root),
+                        yes=False,
+                    )
+                _pause()
+            elif choice == "4":
+                _run_update(config_path=config_path, ref="main", yes=False)
                 _pause()
             elif choice == "0":
                 return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_uninstall_panel(config_path: str) -> bool:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Service and Updates / Uninstall",
+            config_path=config_path,
+            lines=[
+                "1) Remove service only",
+                "2) Full uninstall package",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                uninstall(config_path=config_path, mode="system", purge_data=False, remove_config=False)
+                _pause()
+            elif choice == "2":
+                uninstall(config_path=config_path, mode="system", full=True, yes=False)
+                return True
+            elif choice == "0":
+                return False
             else:
                 console.print("Unknown option")
                 _pause()
@@ -2411,27 +3042,29 @@ def _run_management_panel(config_path: str) -> None:
             title="SimpleOpenRoad Management Terminal",
             config_path=config_path,
             lines=[
-                "1) Settings",
-                "2) Gateway",
-                "3) Providers and keys",
-                "4) Service",
-                "5) Maintenance",
+                "1) Quick setup",
+                "2) Providers and keys",
+                "3) Gateway access",
+                "4) Routing and models",
+                "5) Diagnostics",
+                "6) Service and updates",
                 "0) Exit",
             ],
         )
         choice = _prompt_menu_choice("Select section")
 
         if choice == "1":
-            _run_settings_panel(config_path=config_path)
+            _run_quick_setup_panel(config_path=config_path)
         elif choice == "2":
-            _run_gateway_panel(config_path=config_path)
-        elif choice == "3":
             _run_keys_panel(config_path=config_path)
+        elif choice == "3":
+            _run_api_access_panel(config_path=config_path)
         elif choice == "4":
-            _run_service_panel(config_path=config_path)
+            _run_routing_models_panel(config_path=config_path)
         elif choice == "5":
-            if _run_maintenance_panel(config_path=config_path):
-                return
+            _run_diagnostics_panel(config_path=config_path)
+        elif choice == "6":
+            _run_service_panel(config_path=config_path)
         elif choice == "0":
             return
         else:
