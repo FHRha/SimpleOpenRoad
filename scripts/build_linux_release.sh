@@ -37,6 +37,9 @@ cp "${ROOT_DIR}/README.md" "${STAGE_DIR}/README.md"
 cp "${ROOT_DIR}/install.sh" "${STAGE_DIR}/install.sh"
 cp "${ROOT_DIR}/config/config.example.yaml" "${STAGE_DIR}/config/config.example.yaml"
 
+echo "Building offline wheelhouse"
+"${PYTHON_BIN}" -m pip wheel --wheel-dir "${STAGE_DIR}/wheelhouse" "${ROOT_DIR}"
+
 cat > "${STAGE_DIR}/VERSION" <<EOF
 ${VERSION}
 EOF
