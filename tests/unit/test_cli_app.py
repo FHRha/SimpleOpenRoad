@@ -63,6 +63,11 @@ def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
     assert "SOR_INSTALL_SELF_REEXEC_DONE" in install_script
     assert "maybe_reexec_from_temp_copy" in install_script
     assert "try_install_supported_python_with_apt" in install_script
+    assert "confirm_apt_install" in install_script
+    assert "ASSUME_YES=0" in install_script
+    assert "--yes|-y)" in install_script
+    assert "Install Python and venv packages with apt now?" in install_script
+    assert "Install python${version}-venv with apt now?" in install_script
     assert 'apt-get install -y python3 python3-venv' in install_script
     assert 'for candidate in python3.13 python3.12 python3.11' in install_script
     assert "ensure_python_venv_available" in install_script
@@ -277,6 +282,7 @@ def test_cli_panel_exits_after_full_uninstall(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert called == {"full": True, "yes": False}
+    assert result.stdout.count("SimpleOpenRoad Management Terminal") == 1
 
 
 def test_cli_cleanup_removes_unconfigured_placeholder_keys(tmp_path: Path) -> None:

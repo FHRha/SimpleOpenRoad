@@ -2876,7 +2876,7 @@ def _run_keys_panel(config_path: str) -> None:
             _pause()
 
 
-def _run_service_panel(config_path: str) -> None:
+def _run_service_panel(config_path: str) -> bool:
     while True:
         _print_menu(
             title="SimpleOpenRoad / Service and Updates",
@@ -2918,11 +2918,11 @@ def _run_service_panel(config_path: str) -> None:
                 _pause()
             elif choice == "8":
                 if _run_uninstall_panel(config_path=config_path):
-                    return
+                    return True
             elif choice == "9":
                 _run_settings_panel(config_path=config_path)
             elif choice == "0":
-                return
+                return False
             else:
                 console.print("Unknown option")
                 _pause()
@@ -3064,7 +3064,8 @@ def _run_management_panel(config_path: str) -> None:
         elif choice == "5":
             _run_diagnostics_panel(config_path=config_path)
         elif choice == "6":
-            _run_service_panel(config_path=config_path)
+            if _run_service_panel(config_path=config_path):
+                return
         elif choice == "0":
             return
         else:

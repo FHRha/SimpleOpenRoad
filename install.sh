@@ -9,7 +9,7 @@ usage() {
 SimpleOpenRoad installer
 
 Usage:
-  install.sh [--repo <owner/repo>] [--version <tag>] [--ref <git-ref>] [--arch <x86_64|arm64>] [--python <binary>] [--install-dir <path>] [--bin-dir <path>]
+  install.sh [--repo <owner/repo>] [--version <tag>] [--ref <git-ref>] [--arch <x86_64|arm64>] [--python <binary>] [--install-dir <path>] [--bin-dir <path>] [--yes]
 
 Options:
   --repo        GitHub repository in owner/repo format (default: FHRha/SimpleOpenRoad)
@@ -20,6 +20,7 @@ Options:
   --python      Preferred Python binary (must be >= 3.11)
   --install-dir Target install directory (default: ~/.local/share/simple-open-road, or /usr/local/share/simple-open-road for root)
   --bin-dir     Directory for wrapper binary (default: ~/.local/bin)
+  --yes, -y     Run non-interactively and allow dependency installation
   -h, --help    Show this help
 
 Examples:
@@ -31,6 +32,35 @@ EOF
 BACKGROUND_MODE=""
 STATUS_HINT=""
 PYTHON_BIN=""
+ASSUME_YES=0
+
+confirm_apt_install() {
+  local message="$1"
+  local answer=""
+
+  if [[ "${ASSUME_YES}" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ ! -t 0 && ! -r /dev/tty ]]; then
+    echo "${message}" >&2
+    echo "Dependency installation requires confirmation." >&2
+    echo "Rerun interactively, install dependencies manually, or pass --yes." >&2
+    return 1
+  fi
+
+  printf "%s [y/N]: " "${message}" >/dev/tty
+  read -r answer </dev/tty || true
+  case "${answer}" in
+    y|Y|yes|YES)
+      return 0
+      ;;
+    *)
+      echo "Dependency installation skipped by user." >&2
+      return 1
+      ;;
+  esac
+}
 
 python_is_supported() {
   local bin="$1"
@@ -54,7 +84,11 @@ try_install_supported_python_with_apt() {
     return 1
   fi
 
-  echo "Python >= 3.11 was not found. Trying to install a supported Python runtime via apt..."
+  if ! confirm_apt_install "Python >= 3.11 was not found. Install Python and venv packages with apt now?"; then
+    return 1
+  fi
+
+  echo "Installing supported Python runtime via apt..."
   apt-get update
 
   if DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-venv >/dev/null 2>&1; then
@@ -110,6 +144,10 @@ try_install_python_venv_with_apt() {
   fi
 
   version="$(python_major_minor "${bin}")"
+  if ! confirm_apt_install "Python venv/pip support is missing for ${bin}. Install python${version}-venv with apt now?"; then
+    return 1
+  fi
+
   echo "Python venv support is missing for ${bin}. Installing python${version}-venv via apt..."
   apt-get update
   if DEBIAN_FRONTEND=noninteractive apt-get install -y "python${version}-venv"; then
@@ -515,6 +553,10 @@ while [[ $# -gt 0 ]]; do
       BIN_DIR="$2"
       BIN_DIR_EXPLICIT=1
       shift 2
+      ;;
+    --yes|-y)
+      ASSUME_YES=1
+      shift
       ;;
     -h|--help)
       usage
