@@ -18,13 +18,16 @@ from app.observability.logging import setup_logging
 async def app_lifespan(app: FastAPI):
     container: AppContainer = app.state.container
     cfg = container.runtime_config.get()
+    await container.admin_service.refresh_inventory()
     if cfg.health.startup_check:
         await container.admin_service.validate_all_keys()
     container.health_scheduler.interval_seconds = cfg.health.check_interval_seconds
     container.health_scheduler.start()
+    container.inventory_scheduler.start()
     try:
         yield
     finally:
+        await container.inventory_scheduler.stop()
         await container.health_scheduler.stop()
 
 

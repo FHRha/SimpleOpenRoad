@@ -40,10 +40,7 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
 
     async def list_models(self, key: KeyConfig) -> list[str]:
         data = await self._get(self.models_path, key)
-        if not isinstance(data, dict):
-            return []
-
-        items = data.get("models") or data.get("data") or data.get("items") or []
+        items = self._extract_model_items(data)
         models: list[str] = []
         for item in items:
             if not isinstance(item, dict):
@@ -52,3 +49,17 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
             if model_id:
                 models.append(str(model_id))
         return models
+
+    @staticmethod
+    def _extract_model_items(data: object) -> list[object]:
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            items = data.get("models") or data.get("data") or data.get("items") or []
+            if isinstance(items, list):
+                return items
+            if isinstance(items, dict):
+                nested = items.get("models") or items.get("data") or items.get("items") or []
+                if isinstance(nested, list):
+                    return nested
+        return []

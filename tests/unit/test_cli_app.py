@@ -6,6 +6,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import httpx
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -15,8 +16,10 @@ from app.cli.app import _default_install_root
 from app.cli.app import _ensure_env_master_admin_keys
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
+from app.cli.app import _select_test_alias
 from app.cli.app import _service_mode
 from app.cli.app import _service_unit_path
+from app.cli.app import _test_api_request
 from app.storage.db import SQLiteDB
 
 
@@ -72,7 +75,7 @@ def _write_config(tmp_path: Path) -> Path:
         },
         "routes": {
             "aliases": {
-                "auto/fast": {
+                "custom/fast": {
                     "strategy": "strict_priority",
                     "candidates": [
                         {"provider": "github", "model": "gpt-4.1-mini"},
@@ -219,6 +222,123 @@ def test_cli_menu_command_uses_management_panel(monkeypatch, tmp_path: Path) -> 
     assert called["config_path"] == str(config_path)
 
 
+def test_cli_providers_inventory_uses_cached_snapshot(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    class _FakeAdminService:
+        def current_inventory(self) -> dict:
+            return {
+                "refreshed_at": "2026-04-14T00:00:00+00:00",
+                "key_results": [
+                    {
+                        "provider": "gemini",
+                        "key_id": "gemini-main",
+                        "status": "valid",
+                        "discovered_models": 2,
+                        "error_code": None,
+                    }
+                ],
+                "special_routes": [
+                    {
+                        "provider": "openrouter",
+                        "route_id": "openrouter/free",
+                        "modality": "text",
+                        "supports_tools": False,
+                        "category_hints": ["free"],
+                    }
+                ],
+                "classifications": [
+                    {
+                        "provider": "gemini",
+                        "model_id": "gemini-2.5-flash",
+                        "classification_tags": ["fast", "general"],
+                        "free_score": 0,
+                        "fast_score": 30,
+                        "general_score": 35,
+                        "reasoning_score": 0,
+                        "code_score": 0,
+                    }
+                ],
+                "generated_aliases": [
+                    {
+                        "alias_id": "gemini/text/fast",
+                        "modality": "text",
+                        "scope": "provider",
+                        "category": "fast",
+                        "candidates": [
+                            {
+                                "provider": "gemini",
+                                "model_id": "gemini-2.5-flash",
+                                "candidate_type": "model",
+                            }
+                        ],
+                    },
+                    {
+                        "alias_id": "auto/text/fast",
+                        "modality": "text",
+                        "scope": "global",
+                        "category": "fast",
+                        "candidates": [
+                            {
+                                "provider": "gemini",
+                                "model_id": "gemini-2.5-flash",
+                                "candidate_type": "model",
+                            }
+                        ],
+                    },
+                    {
+                        "alias_id": "auto/image/default",
+                        "modality": "image",
+                        "scope": "global",
+                        "category": "default",
+                        "candidates": [
+                            {
+                                "provider": "gemini",
+                                "model_id": "imagen-4.0-generate-001",
+                                "candidate_type": "model",
+                            }
+                        ],
+                    },
+                ],
+                "models": [
+                    {
+                        "provider": "gemini",
+                        "model_id": "gemini-2.5-flash",
+                        "modality": "text",
+                        "source_key_ids": ["gemini-main"],
+                        "is_free": False,
+                        "is_preview": False,
+                        "is_special": False,
+                        "is_text_candidate": True,
+                        "chat_state": "supported",
+                        "responses_state": "supported",
+                        "stream_state": "supported",
+                        "tools_state": "unknown",
+                        "excluded_reason": None,
+                    }
+                ],
+            }
+
+    class _FakeContainer:
+        admin_service = _FakeAdminService()
+
+    monkeypatch.setattr("app.cli.app._container", lambda config_path: _FakeContainer())
+
+    result = runner.invoke(cli_app, ["providers", "inventory", "--config-path", str(config_path), "--cached"])
+
+    assert result.exit_code == 0
+    assert "Provider Inventory / Keys" in result.stdout
+    assert "Provider Inventory / Models" in result.stdout
+    assert "Provider Inventory / Special Routes" in result.stdout
+    assert "Provider Inventory / Generated Aliases" in result.stdout
+    assert "gemini-main" in result.stdout
+    assert "openrouter/free" in result.stdout
+    assert "text" in result.stdout
+    assert "image" in result.stdout
+    assert "fast" in result.stdout or "general" in result.stdout
+
+
 def test_cli_panel_accepts_zero_exit() -> None:
     runner = CliRunner()
 
@@ -246,6 +366,38 @@ def test_cli_settings_section_updates_tool_capabilities(tmp_path: Path) -> None:
     assert "gemini-2.5-flash" not in data["model_capabilities"]["tool_disabled"]
 
 
+def test_cli_settings_section_can_add_and_remove_inventory_override(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="6\n9\n10\n5\n2\nopenrouter\nopenai/*codex*\ny\nn\nskip\ncode\ntrue\nskip\npromote codex\n\n3\n1\n\n0\n0\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data.get("inventory", {}).get("overrides", []) == []
+
+
+def test_cli_settings_section_updates_inventory_refresh_schedule(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="6\n9\n13\n1\n04:30\n\n2\nUTC\n\n3\n12\n\n0\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data["inventory"]["refresh_time"] == "04:30"
+    assert data["inventory"]["refresh_timezone"] == "UTC"
+    assert data["inventory"]["refresh_interval_hours"] == 12
+
+
 def test_cli_settings_alias_editor_adds_candidate_by_numbers(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
@@ -258,7 +410,7 @@ def test_cli_settings_alias_editor_adds_candidate_by_numbers(tmp_path: Path) -> 
 
     assert result.exit_code == 0
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    first = data["routes"]["aliases"]["auto/fast"]["candidates"][0]
+    first = data["routes"]["aliases"]["custom/fast"]["candidates"][0]
     assert first["provider"] == "openrouter"
     assert first["model"] == "gpt-5.4-mini"
 
@@ -275,7 +427,7 @@ def test_cli_settings_alias_editor_updates_strategy_and_selection(tmp_path: Path
 
     assert result.exit_code == 0
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    alias_cfg = data["routes"]["aliases"]["auto/fast"]
+    alias_cfg = data["routes"]["aliases"]["custom/fast"]
     assert alias_cfg["strategy"] == "least_errors"
     assert alias_cfg["selection"] == "adaptive"
 
@@ -390,6 +542,228 @@ def test_cli_api_access_section_waits_before_back(monkeypatch) -> None:
     assert "Press Enter to return" in result.stdout
 
 
+def test_test_api_request_shows_selected_and_failed_candidates(monkeypatch, tmp_path: Path, capsys) -> None:
+    config_path = _write_config(tmp_path)
+
+    def _fake_post(url: str, headers: dict[str, str], json: dict, timeout: float) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "x-sor-selected-model": "openrouter/gpt-5.4-mini",
+                "x-sor-failed-candidates": "github/gpt-4.1-mini, gemini/gemini-2.5-flash",
+            },
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-5.4-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.cli.app._current_master_api_key", lambda: "master-key")
+    monkeypatch.setattr("app.cli.app._resolve_local_api_base_url", lambda cfg: "http://127.0.0.1:12345")
+    monkeypatch.setattr("app.cli.app.httpx.post", _fake_post)
+
+    _test_api_request(str(config_path))
+
+    output = capsys.readouterr().out
+    assert "Answered model" in output
+    assert "openrouter/gpt-5.4-mini" in output
+    assert "Failed candidates" in output
+    assert "github/gpt-4.1-mini, gemini/gemini-2.5-flash" in output
+
+
+def test_test_api_request_shows_failed_candidates_from_error_diagnostics(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    config_path = _write_config(tmp_path)
+
+    def _fake_post(url: str, headers: dict[str, str], json: dict, timeout: float) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={
+                "detail": {
+                    "message": "No healthy route candidates available",
+                    "type": "provider_unavailable",
+                    "details": {
+                        "candidates": [
+                            {
+                                "provider": "github",
+                                "model": "gpt-4.1-mini",
+                                "status": "skipped",
+                                "reason": "keys_unhealthy_or_cooling_down",
+                                "available_keys": "0",
+                            },
+                            {
+                                "provider": "openrouter",
+                                "model": "gpt-5.4-mini",
+                                "status": "skipped",
+                                "reason": "no_available_keys",
+                                "available_keys": "0",
+                            },
+                        ]
+                    },
+                }
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("app.cli.app._current_master_api_key", lambda: "master-key")
+    monkeypatch.setattr("app.cli.app._resolve_local_api_base_url", lambda cfg: "http://127.0.0.1:12345")
+    monkeypatch.setattr("app.cli.app.httpx.post", _fake_post)
+
+    _test_api_request(str(config_path))
+
+    output = capsys.readouterr().out
+    assert "Failed candidates" in output
+    assert "github/gpt-4.1-mini, openrouter/gpt-5.4-mini" in output
+
+
+def test_select_test_alias_prefers_generated_aliases(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    monkeypatch.setattr(
+        "app.cli.app._current_inventory_snapshot",
+        lambda config_path, refresh=False: {
+            "generated_aliases": [
+                {"alias_id": "auto/general"},
+                {"alias_id": "auto/fast"},
+                {"alias_id": "auto/code"},
+                {"alias_id": "auto/free"},
+            ]
+        },
+    )
+    monkeypatch.setattr("app.cli.app._prompt_menu_choice", lambda prompt="Select option", default="1": "2")
+
+    selected = _select_test_alias(str(config_path))
+
+    assert selected == "auto/free"
+
+
+def test_select_test_alias_refreshes_empty_inventory_before_prompt(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    calls: list[bool] = []
+
+    def _fake_snapshot(config_path: str, refresh: bool = False) -> dict:
+        calls.append(refresh)
+        if refresh:
+            return {"generated_aliases": [{"alias_id": "auto/fast"}]}
+        return {"generated_aliases": []}
+
+    monkeypatch.setattr("app.cli.app._current_inventory_snapshot", _fake_snapshot)
+    monkeypatch.setattr("app.cli.app._prompt_menu_choice", lambda prompt="Select option", default="1": "1")
+
+    selected = _select_test_alias(str(config_path))
+
+    assert calls == [False, True]
+    assert selected == "auto/fast"
+
+
+def test_select_test_alias_returns_none_when_no_aliases_available(monkeypatch, tmp_path: Path, capsys) -> None:
+    config_path = _write_config(tmp_path)
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["routes"]["aliases"] = {}
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    monkeypatch.setattr("app.cli.app._current_inventory_snapshot", lambda config_path, refresh=False: {"generated_aliases": []})
+
+    selected = _select_test_alias(str(config_path))
+
+    assert selected is None
+    assert "No generated or custom aliases are available" in capsys.readouterr().out
+
+
+def test_select_test_alias_rejects_unavailable_generated_manual_alias(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    monkeypatch.setattr("app.cli.app._current_inventory_snapshot", lambda config_path, refresh=False: {"generated_aliases": []})
+    prompts = iter(["m", "auto/unknown"])
+    monkeypatch.setattr("app.cli.app._prompt_menu_choice", lambda prompt="Select option", default="1": next(prompts))
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda message, default="": "auto/unknown")
+
+    with pytest.raises(Exception):
+        _select_test_alias(str(config_path))
+
+
+def test_cli_gateway_access_automatic_test_prompts_for_alias(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    called: dict[str, str] = {}
+
+    monkeypatch.setattr(
+        "app.cli.app._current_inventory_snapshot",
+        lambda config_path, refresh=False: {
+            "generated_aliases": [
+                {"alias_id": "auto/fast"},
+                {"alias_id": "auto/general"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "app.cli.app._test_api_request",
+        lambda config_path, model="auto/fast": called.update({"config_path": config_path, "model": model}),
+    )
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="3\n3\n2\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert called["config_path"] == str(config_path)
+    assert called["model"] == "auto/general"
+    assert "Select Alias for Automatic API Test" in result.stdout
+
+
+def test_keys_validate_prints_summary_table(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    class _FakeAdminService:
+        async def validate_all_keys(self) -> list[dict]:
+            return [
+                {
+                    "provider": "github",
+                    "key_id": "github-main",
+                    "status": "valid",
+                    "models": ["gpt-4.1", "gpt-5.4-mini"],
+                    "latency_ms": 123.4,
+                    "error_code": None,
+                    "error_message": None,
+                },
+                {
+                    "provider": "gemini",
+                    "key_id": "gemini-main",
+                    "status": "degraded",
+                    "models": [],
+                    "latency_ms": 456.7,
+                    "error_code": "region_blocked",
+                    "error_message": "User location is not supported",
+                },
+            ]
+
+    class _FakeContainer:
+        admin_service = _FakeAdminService()
+
+    monkeypatch.setattr("app.cli.app._container", lambda config_path: _FakeContainer())
+
+    result = runner.invoke(cli_app, ["keys", "validate", "--config-path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Key Validation" in result.stdout
+    assert "github-main" in result.stdout
+    assert "gemini-main" in result.stdout
+    assert "123.40" in result.stdout
+    assert "2" in result.stdout
+    assert "region_blocked" in result.stdout
+
+
 def test_cli_panel_exits_after_full_uninstall(monkeypatch) -> None:
     runner = CliRunner()
     called: dict[str, bool] = {}
@@ -456,7 +830,7 @@ def test_cli_routes_preview_shows_planned_candidates(tmp_path: Path) -> None:
 
     result = runner.invoke(
         cli_app,
-        ["routes", "preview", "--model", "auto/fast", "--config-path", str(config_path)],
+        ["routes", "preview", "--model", "custom/fast", "--config-path", str(config_path)],
     )
 
     assert result.exit_code == 0
@@ -472,7 +846,7 @@ def test_cli_routes_preview_includes_runtime_key_details(tmp_path: Path) -> None
 
     result = runner.invoke(
         cli_app,
-        ["routes", "preview", "--model", "auto/fast", "--config-path", str(config_path)],
+        ["routes", "preview", "--model", "custom/fast", "--config-path", str(config_path)],
     )
 
     assert result.exit_code == 0
@@ -577,6 +951,86 @@ def test_cli_update_runs_installer_with_existing_paths(monkeypatch, tmp_path: Pa
     ]
 
 
+def test_cli_update_restarts_service_after_success(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    bin_dir = tmp_path / "bin"
+    config_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    systemctl_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr("app.cli.app._run_streaming_command", lambda command, check=True: None)
+    monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(
+        "app.cli.app._run_systemctl",
+        lambda mode, *args, **kwargs: systemctl_calls.append((mode, *args)),
+    )
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--install-dir",
+            str(install_root),
+            "--bin-dir",
+            str(bin_dir),
+            "--version",
+            "v1.2.3",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert ("system", "restart", "sor") in systemctl_calls
+    assert "Service restarted" in result.stdout
+
+
+def test_cli_update_can_skip_service_restart(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    install_root = tmp_path / "simple-open-road"
+    config_dir = install_root / "config"
+    bin_dir = tmp_path / "bin"
+    config_dir.mkdir(parents=True)
+    bin_dir.mkdir()
+    (install_root / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump({"providers": {}, "health": {"startup_check": False}}), encoding="utf-8")
+
+    systemctl_calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr("app.cli.app._run_streaming_command", lambda command, check=True: None)
+    monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/bin/systemctl" if name == "systemctl" else None)
+    monkeypatch.setattr(
+        "app.cli.app._run_systemctl",
+        lambda mode, *args, **kwargs: systemctl_calls.append((mode, *args)),
+    )
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "update",
+            "--config-path",
+            str(config_path),
+            "--install-dir",
+            str(install_root),
+            "--bin-dir",
+            str(bin_dir),
+            "--version",
+            "v1.2.3",
+            "--yes",
+            "--no-restart",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert systemctl_calls == []
+
+
 def test_cli_panel_update_uses_plain_defaults(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     install_root = tmp_path / "simple-open-road"
@@ -613,6 +1067,9 @@ def test_cli_panel_update_uses_plain_defaults(monkeypatch, tmp_path: Path) -> No
     assert "v9.9.9" in called["command"]
     assert "Version to install" in result.stdout
     assert "v9.9.9" in result.stdout
+    assert "Current panel is closing" in result.stdout
+    assert "SimpleOpenRoad Management Terminal" in result.stdout
+    assert "SimpleOpenRoad / Service and Updates / Update" in result.stdout
 
 
 def test_cli_update_resolves_latest_before_running_installer(monkeypatch, tmp_path: Path) -> None:
@@ -941,7 +1398,7 @@ def test_cli_routes_set_priority(tmp_path: Path) -> None:
             "routes",
             "set-priority",
             "--alias",
-            "auto/fast",
+            "custom/fast",
             "--candidate",
             "openrouter/gpt-4o-mini",
             "--position",
@@ -953,7 +1410,7 @@ def test_cli_routes_set_priority(tmp_path: Path) -> None:
     assert result.exit_code == 0
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    first = data["routes"]["aliases"]["auto/fast"]["candidates"][0]
+    first = data["routes"]["aliases"]["custom/fast"]["candidates"][0]
     assert first["provider"] == "openrouter"
     assert first["model"] == "gpt-4o-mini"
 
@@ -1041,19 +1498,29 @@ def test_setup_summary_prints_openai_plugin_settings(monkeypatch, tmp_path: Path
     monkeypatch.delenv("APP_PUBLIC_DOMAIN", raising=False)
     monkeypatch.delenv("APP_DOMAIN", raising=False)
     monkeypatch.setattr("app.cli.app._detect_server_ip", lambda: "10.20.30.40")
+    monkeypatch.setattr(
+        "app.cli.app._current_inventory_snapshot",
+        lambda config_path, refresh=False: {
+            "generated_aliases": [
+                {"alias_id": "auto/general"},
+                {"alias_id": "auto/fast"},
+                {"alias_id": "auto/code"},
+            ]
+        },
+    )
 
     _print_setup_summary(config_path=str(config_path), cfg=cfg)
 
     output = capsys.readouterr().out
     assert "Base URL: http://10.20.30.40:12345/v1" in output
     assert "auto/fast" in output
-    assert "Recommended default: auto/smart" in output
+    assert "Recommended default: auto/general" in output
     assert "Model Alias Guide" in output
-    assert "auto/smart" in output
-    assert "recommended default; local heuristic" in output
+    assert "auto/general" in output
+    assert "recommended default for general chat and everyday use" in output
     assert "auto/code" in output
     assert "coding, debugging, refactoring" in output
-    assert "Alias fallback: candidates are tried in order" in output
+    assert "Generated aliases are built from current provider inventory" in output
     assert "Chat endpoint: http://10.20.30.40:12345/v1/chat/completions" in output
 
 

@@ -9,9 +9,9 @@ from app.api.deps import get_container, require_user_auth
 from app.api.schemas_openai import ChatCompletionsRequestSchema, ResponsesRequestSchema
 from app.container import AppContainer
 from app.core.errors import GatewayError
-from app.core.types import ChatMessage, UnifiedLLMRequest
+from app.core.types import ChatMessage, RouterDecision, UnifiedLLMRequest
+from app.inventory.models import GeneratedAlias, GeneratedAliasCandidate
 from app.router.alias_resolver import resolve_candidates
-
 router = APIRouter()
 
 _CHAT_KNOWN_EXTRA_FIELDS = {
@@ -81,13 +81,43 @@ def _responses_extra_body(payload: ResponsesRequestSchema) -> dict:
     return extra
 
 
+def _decision_headers(request_id: str, decision: RouterDecision, payload: dict | None = None) -> dict[str, str]:
+    headers = {"x-request-id": request_id}
+    selected_model = None
+    selected_attempt = next((item for item in reversed(decision.attempts) if item.success), None)
+    if selected_attempt is not None:
+        selected_model = f"{selected_attempt.provider}/{selected_attempt.model}"
+    elif isinstance(payload, dict):
+        model_value = payload.get("model")
+        if isinstance(model_value, str) and model_value.strip():
+            selected_model = model_value.strip()
+    if selected_model:
+        headers["x-sor-selected-model"] = selected_model
+
+    failed_candidates: list[str] = []
+    seen: set[str] = set()
+    for attempt in decision.attempts:
+        if attempt.success:
+            continue
+        label = f"{attempt.provider}/{attempt.model}"
+        if label in seen:
+            continue
+        seen.add(label)
+        failed_candidates.append(label)
+    if failed_candidates:
+        headers["x-sor-failed-candidates"] = ", ".join(failed_candidates[:10])
+    return headers
+
+
 @router.get("/health")
 async def health(container: AppContainer = Depends(get_container)) -> dict:
     cfg = container.runtime_config.get()
+    inventory = container.admin_service.current_inventory()
+    generated_aliases = inventory.get("generated_aliases", []) if isinstance(inventory, dict) else []
     return {
         "status": "ok",
         "providers": len(container.routing_engine.providers),
-        "aliases": len(cfg.routes.aliases),
+        "aliases": len(generated_aliases) + len(cfg.routes.aliases),
     }
 
 
@@ -101,19 +131,70 @@ async def models(container: AppContainer = Depends(get_container)) -> dict:
     cfg = container.runtime_config.get()
     seen: set[str] = set()
     data: list[dict] = []
+    inventory = container.admin_service.current_inventory()
+    if not inventory:
+        inventory = await container.admin_service.refresh_inventory()
 
+    generated_aliases = inventory.get("generated_aliases", []) if isinstance(inventory, dict) else []
+    generated_alias_objects: list[GeneratedAlias] = []
+    for alias in generated_aliases:
+        if not isinstance(alias, dict):
+            continue
+        if str(alias.get("modality", "text")) != "text":
+            continue
+        alias_name = str(alias.get("alias_id", "")).strip()
+        if not alias_name or alias_name in seen:
+            continue
+        generated_alias_objects.append(
+            GeneratedAlias(
+                alias_id=alias_name,
+                scope=str(alias.get("scope", "global")),
+                modality=str(alias.get("modality", "text")),
+                category=str(alias.get("category", "")),
+                provider_scope=alias.get("provider_scope"),
+                candidates=[
+                    GeneratedAliasCandidate(
+                        provider=str(candidate.get("provider", "")),
+                        model_id=str(candidate.get("model_id", "")),
+                        candidate_type=str(candidate.get("candidate_type", "model")),
+                    )
+                    for candidate in alias.get("candidates", [])
+                    if isinstance(candidate, dict)
+                ],
+                generation_reason=str(alias.get("generation_reason", "")),
+            )
+        )
+        data.append(_model_item(alias_name))
+        seen.add(alias_name)
+        candidates = alias.get("candidates", [])
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            provider = str(candidate.get("provider", "")).strip()
+            model_id = str(candidate.get("model_id", "")).strip()
+            if not provider or not model_id:
+                continue
+            direct_model_id = f"{provider}/{model_id}"
+            if direct_model_id in seen:
+                continue
+            data.append(_model_item(direct_model_id))
+            seen.add(direct_model_id)
     for alias_name in cfg.routes.aliases:
-        candidates, _ = resolve_candidates(cfg, alias_name)
+        if alias_name in seen:
+            continue
+        candidates, _ = resolve_candidates(cfg, alias_name, generated_aliases=generated_alias_objects)
         if not candidates:
             continue
-        if alias_name not in seen:
-            data.append(_model_item(alias_name))
-            seen.add(alias_name)
+        data.append(_model_item(alias_name))
+        seen.add(alias_name)
         for candidate in candidates:
             direct_model_id = f"{candidate.provider}/{candidate.model}"
-            if direct_model_id not in seen:
-                data.append(_model_item(direct_model_id))
-                seen.add(direct_model_id)
+            if direct_model_id in seen:
+                continue
+            data.append(_model_item(direct_model_id))
+            seen.add(direct_model_id)
 
     return {"object": "list", "data": data}
 
@@ -138,8 +219,8 @@ async def chat_completions(
             stream, ctx = await container.gateway_service.stream_chat_completions(request)
             return StreamingResponse(stream, media_type="text/event-stream", headers={"x-request-id": ctx.request_id})
 
-        result, request_id = await container.gateway_service.chat_completions(request)
-        return JSONResponse(content=result, headers={"x-request-id": request_id})
+        result, request_id, decision = await container.gateway_service.chat_completions(request)
+        return JSONResponse(content=result, headers=_decision_headers(request_id, decision, result))
     except GatewayError as exc:
         detail = {
             "message": exc.message,
@@ -170,8 +251,8 @@ async def responses(
         extra_body=_responses_extra_body(payload),
     )
     try:
-        result, request_id = await container.gateway_service.responses(request)
-        return JSONResponse(content=result, headers={"x-request-id": request_id})
+        result, request_id, decision = await container.gateway_service.responses(request)
+        return JSONResponse(content=result, headers=_decision_headers(request_id, decision, result))
     except GatewayError as exc:
         detail = {
             "message": exc.message,

@@ -54,6 +54,30 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             payload["max_tokens"] = request.max_tokens
         return payload
 
+    @staticmethod
+    def _classify_error_response(status_code: int, body: str) -> ErrorClass:
+        body_lower = body.lower()
+        if status_code == 401:
+            return ErrorClass.AUTH_INVALID
+        if status_code == 403:
+            quota_markers = (
+                "limit exceeded",
+                "rate limit",
+                "quota",
+                "insufficient credits",
+                "insufficient balance",
+                "billing",
+                "credits",
+            )
+            if any(marker in body_lower for marker in quota_markers):
+                return ErrorClass.RATE_LIMIT
+            return ErrorClass.AUTH_FORBIDDEN
+        if status_code == 429:
+            return ErrorClass.RATE_LIMIT
+        if 500 <= status_code < 600:
+            return ErrorClass.PROVIDER_UNAVAILABLE
+        return ErrorClass.UNKNOWN
+
     async def _post(self, path: str, payload: dict[str, Any], key: KeyConfig) -> dict:
         timeout = httpx.Timeout(timeout=self.config.timeout_seconds)
         try:
@@ -81,16 +105,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             ) from exc
 
         if response.status_code >= 400:
-            error_class = ErrorClass.UNKNOWN
-            if response.status_code == 401:
-                error_class = ErrorClass.AUTH_INVALID
-            elif response.status_code == 403:
-                error_class = ErrorClass.AUTH_FORBIDDEN
-            elif response.status_code == 429:
-                error_class = ErrorClass.RATE_LIMIT
-            elif 500 <= response.status_code < 600:
-                error_class = ErrorClass.PROVIDER_UNAVAILABLE
             body = response.text[:1000]
+            error_class = self._classify_error_response(response.status_code, body)
             raise GatewayError(
                 message=f"Provider {self.provider_name} returned {response.status_code}: {body}",
                 error_class=error_class,
@@ -134,15 +150,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                     ) as response:
                         if response.status_code >= 400:
                             body = (await response.aread()).decode("utf-8", errors="replace")[:1000]
-                            error_class = ErrorClass.UNKNOWN
-                            if response.status_code == 401:
-                                error_class = ErrorClass.AUTH_INVALID
-                            elif response.status_code == 403:
-                                error_class = ErrorClass.AUTH_FORBIDDEN
-                            elif response.status_code == 429:
-                                error_class = ErrorClass.RATE_LIMIT
-                            elif 500 <= response.status_code < 600:
-                                error_class = ErrorClass.PROVIDER_UNAVAILABLE
+                            error_class = self._classify_error_response(response.status_code, body)
                             raise GatewayError(
                                 message=(
                                     f"Provider {self.provider_name} stream error {response.status_code}: {body}"
@@ -225,16 +233,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             ) from exc
 
         if response.status_code >= 400:
-            error_class = ErrorClass.UNKNOWN
-            if response.status_code == 401:
-                error_class = ErrorClass.AUTH_INVALID
-            elif response.status_code == 403:
-                error_class = ErrorClass.AUTH_FORBIDDEN
-            elif response.status_code == 429:
-                error_class = ErrorClass.RATE_LIMIT
-            elif 500 <= response.status_code < 600:
-                error_class = ErrorClass.PROVIDER_UNAVAILABLE
             body = response.text[:1000]
+            error_class = self._classify_error_response(response.status_code, body)
             raise GatewayError(
                 message=f"Provider {self.provider_name} returned {response.status_code}: {body}",
                 error_class=error_class,

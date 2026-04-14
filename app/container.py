@@ -6,6 +6,8 @@ from importlib.resources import files
 from app.config.runtime import RuntimeConfig
 from app.health.checker import HealthChecker
 from app.health.scheduler import HealthScheduler
+from app.inventory.discovery import InventoryDiscoveryService
+from app.inventory.scheduler import InventoryRefreshScheduler
 from app.observability.metrics import MetricsService
 from app.registry.keys import KeyRegistry
 from app.router.engine import RoutingEngine
@@ -15,6 +17,7 @@ from app.storage.db import SQLiteDB
 from app.storage.repositories.attempts_repo import AttemptsRepository
 from app.storage.repositories.health_repo import HealthRepository
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
+from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
 
 
@@ -30,17 +33,25 @@ class AppContainer:
         self.keys_repo = KeysRuntimeRepository(self.db)
         self.health_repo = HealthRepository(self.db)
         self.attempts_repo = AttemptsRepository(self.db)
+        self.route_memory_repo = RouteModelMemoryRepository(self.db)
         self.stats_repo = StatsRepository(self.db)
 
         self.key_registry = KeyRegistry(self.keys_repo)
         self.key_registry.sync_defaults(self.runtime_config.get())
 
+        self.inventory_discovery = InventoryDiscoveryService(
+            runtime_config=self.runtime_config,
+            providers={},
+        )
         self.routing_engine = RoutingEngine(
             runtime_config=self.runtime_config,
             key_registry=self.key_registry,
             attempts_repo=self.attempts_repo,
+            route_memory_repo=self.route_memory_repo,
             stats_repo=self.stats_repo,
+            inventory_discovery=self.inventory_discovery,
         )
+        self.inventory_discovery.refresh_providers(self.routing_engine.providers)
 
         self.health_checker = HealthChecker(
             runtime_config=self.runtime_config,
@@ -52,6 +63,10 @@ class AppContainer:
             checker=self.health_checker,
             interval_seconds=self.runtime_config.get().health.check_interval_seconds,
         )
+        self.inventory_scheduler = InventoryRefreshScheduler(
+            runtime_config=self.runtime_config,
+            discovery=self.inventory_discovery,
+        )
 
         self.metrics_service = MetricsService(self.stats_repo)
         self.gateway_service = GatewayService(self.routing_engine)
@@ -62,4 +77,5 @@ class AppContainer:
             health_repo=self.health_repo,
             metrics=self.metrics_service,
             routing_engine=self.routing_engine,
+            inventory_discovery=self.inventory_discovery,
         )

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -84,6 +87,41 @@ class ModelCapabilitiesConfig(BaseModel):
     )
 
 
+class InventoryOverrideConfig(BaseModel):
+    provider: str | None = None
+    model_pattern: str
+    force_include: bool = False
+    force_exclude: bool = False
+    force_modality: Literal["text", "image", "video", "audio", "embedding", "other"] | None = None
+    force_categories: list[Literal["free", "fast", "general", "reasoning", "code"]] = Field(default_factory=list)
+    force_tool_capable: bool | None = None
+    force_tool_disabled: bool | None = None
+    reason: str = ""
+
+
+class InventoryConfig(BaseModel):
+    refresh_time: str = "05:00"
+    refresh_timezone: str = "Europe/Moscow"
+    refresh_interval_hours: int = 24
+    overrides: list[InventoryOverrideConfig] = Field(default_factory=list)
+
+    @field_validator("refresh_time")
+    @classmethod
+    def validate_refresh_time(cls, value: str) -> str:
+        try:
+            datetime.strptime(value, "%H:%M")
+        except ValueError as exc:
+            raise ValueError("refresh_time must use HH:MM format") from exc
+        return value
+
+    @field_validator("refresh_interval_hours")
+    @classmethod
+    def validate_refresh_interval_hours(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("refresh_interval_hours must be at least 1")
+        return value
+
+
 class KeyLimitsConfig(BaseModel):
     rpm: int | None = None
     tpm: int | None = None
@@ -154,6 +192,7 @@ class GatewayConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
     model_capabilities: ModelCapabilitiesConfig = Field(default_factory=ModelCapabilitiesConfig)
+    inventory: InventoryConfig = Field(default_factory=InventoryConfig)
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     routes: RoutesConfig = Field(default_factory=RoutesConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

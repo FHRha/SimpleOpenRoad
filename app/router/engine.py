@@ -12,19 +12,32 @@ from app.core.errors import ErrorClass, GatewayError
 from app.core.security import is_configured_secret
 from app.core.types import LLMUsage, RequestContext, RouteCandidate, RouterAttempt, RouterDecision, UnifiedLLMRequest
 from app.core.utils import mask_secret, utcnow_iso
+from app.inventory.discovery import InventoryDiscoveryService
+from app.inventory.models import GeneratedAlias
 from app.observability.logging import get_logger
 from app.providers.base import ProviderAdapter
 from app.providers.registry import build_provider_registry
 from app.registry.keys import KeyRegistry
 from app.router.backoff import sleep_with_backoff
 from app.router.classifier import classify_error
-from app.router.model_planner import plan_candidates
+from app.router.model_planner import classify_request_profile, estimate_request_tokens, plan_candidates
 from app.router.policy import policy_action, should_retry_same_key, should_switch_provider
 from app.router.response_validator import validate_chat_completion_payload, validate_responses_payload
 from app.router.selector import select_keys
 from app.router.stream_normalizer import normalize_openai_stream
 from app.storage.repositories.attempts_repo import AttemptsRepository
+from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
+
+
+def _context_bucket(token_estimate: int) -> str:
+    if token_estimate < 8_000:
+        return "small"
+    if token_estimate < 32_000:
+        return "medium"
+    if token_estimate < 128_000:
+        return "large"
+    return "huge"
 
 
 class RoutingEngine:
@@ -33,12 +46,16 @@ class RoutingEngine:
         runtime_config: RuntimeConfig,
         key_registry: KeyRegistry,
         attempts_repo: AttemptsRepository,
+        route_memory_repo: RouteModelMemoryRepository | None,
         stats_repo: StatsRepository,
+        inventory_discovery: InventoryDiscoveryService,
     ):
         self.runtime_config = runtime_config
         self.key_registry = key_registry
         self.attempts_repo = attempts_repo
+        self.route_memory_repo = route_memory_repo
         self.stats_repo = stats_repo
+        self.inventory_discovery = inventory_discovery
         self.logger = get_logger("gateway.router")
         self.providers: dict[str, ProviderAdapter] = build_provider_registry(runtime_config.get())
 
@@ -73,13 +90,79 @@ class RoutingEngine:
         return detail
 
     @staticmethod
-    def _diagnostic_candidates(config, request: UnifiedLLMRequest, candidates: list[RouteCandidate]) -> list[RouteCandidate]:
+    def _diagnostic_candidates(
+        config,
+        request: UnifiedLLMRequest,
+        candidates: list[RouteCandidate],
+        generated_aliases: list[GeneratedAlias] | None = None,
+    ) -> list[RouteCandidate]:
         if candidates:
             return candidates
+        alias_map = {alias.alias_id: alias for alias in generated_aliases or []}
+        generated_alias = alias_map.get(request.model)
+        if generated_alias is not None:
+            return [
+                RouteCandidate(provider=candidate.provider, model=candidate.model_id)
+                for candidate in generated_alias.candidates
+            ]
         if request.model in config.routes.aliases:
             alias_cfg = config.routes.aliases[request.model]
             return [RouteCandidate(provider=c.provider, model=c.model) for c in alias_cfg.candidates]
-        return []
+        if "/" in request.model:
+            provider_name, model_name = request.model.split("/", 1)
+            if provider_name in config.providers:
+                return [RouteCandidate(provider=provider_name, model=model_name)]
+        return [
+            RouteCandidate(provider=provider_name, model=request.model)
+            for provider_name, provider in sorted(config.providers.items(), key=lambda item: item[1].priority)
+            if provider.enabled
+        ]
+
+    @staticmethod
+    def _route_memory_key(request: UnifiedLLMRequest) -> tuple[str, str]:
+        profile = classify_request_profile(request)
+        return profile, _context_bucket(estimate_request_tokens(request))
+
+    def _prioritize_remembered_candidate(
+        self,
+        *,
+        candidates: list[RouteCandidate],
+        resolved_alias: str | None,
+        profile: str,
+        context_bucket: str,
+    ) -> list[RouteCandidate]:
+        if not resolved_alias or self.route_memory_repo is None:
+            return candidates
+        remembered = self.route_memory_repo.get(resolved_alias, profile, context_bucket)
+        if not remembered:
+            return candidates
+        remembered_marker = (remembered.get("provider"), remembered.get("model"))
+        for index, candidate in enumerate(candidates):
+            if (candidate.provider, candidate.model) != remembered_marker:
+                continue
+            return [candidate, *candidates[:index], *candidates[index + 1 :]]
+        return candidates
+
+    def _remember_successful_candidate(
+        self,
+        *,
+        resolved_alias: str | None,
+        profile: str,
+        context_bucket: str,
+        candidate: RouteCandidate,
+        latency_ms: float,
+    ) -> None:
+        if not resolved_alias or self.route_memory_repo is None:
+            return
+        self.route_memory_repo.record_success(
+            route_alias=resolved_alias,
+            profile=profile,
+            context_bucket=context_bucket,
+            provider=candidate.provider,
+            model=candidate.model,
+            latency_ms=latency_ms,
+            updated_at=utcnow_iso(),
+        )
 
     @staticmethod
     def _cooldown_error(
@@ -170,7 +253,18 @@ class RoutingEngine:
         context: RequestContext,
     ) -> tuple[dict, RouterDecision]:
         config = self.runtime_config.get()
-        candidates, resolved_alias = plan_candidates(config, request)
+        snapshot = self.inventory_discovery.current_snapshot()
+        if snapshot is None:
+            snapshot = await self.inventory_discovery.refresh()
+        generated_aliases = [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+        candidates, resolved_alias = plan_candidates(config, request, generated_aliases=generated_aliases)
+        route_profile, context_bucket = self._route_memory_key(request)
+        candidates = self._prioritize_remembered_candidate(
+            candidates=candidates,
+            resolved_alias=resolved_alias,
+            profile=route_profile,
+            context_bucket=context_bucket,
+        )
         selection_strategy = config.routing.default_strategy
         if resolved_alias and resolved_alias in config.routes.aliases:
             selection_strategy = config.routes.aliases[resolved_alias].strategy
@@ -265,6 +359,13 @@ class RoutingEngine:
                         decision.attempts.append(router_attempt)
                         decision.selected_provider = candidate.provider
                         decision.selected_key_id = key.id
+                        self._remember_successful_candidate(
+                            resolved_alias=resolved_alias,
+                            profile=route_profile,
+                            context_bucket=context_bucket,
+                            candidate=candidate,
+                            latency_ms=latency_ms,
+                        )
                         payload["model"] = f"{candidate.provider}/{candidate.model}"
                         return payload, decision
                     except Exception as exc:  # noqa: BLE001 - normalized below
@@ -362,7 +463,7 @@ class RoutingEngine:
             raise cooldown_error
 
         if not candidate_details:
-            for candidate in self._diagnostic_candidates(config, request, candidates):
+            for candidate in self._diagnostic_candidates(config, request, candidates, generated_aliases):
                 provider = config.providers.get(candidate.provider)
                 if provider is None:
                     candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_not_configured"))
@@ -384,7 +485,18 @@ class RoutingEngine:
         context: RequestContext,
     ) -> tuple[AsyncIterator[bytes], RouterDecision]:
         config = self.runtime_config.get()
-        candidates, resolved_alias = plan_candidates(config, request)
+        snapshot = self.inventory_discovery.current_snapshot()
+        if snapshot is None:
+            snapshot = await self.inventory_discovery.refresh()
+        generated_aliases = [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+        candidates, resolved_alias = plan_candidates(config, request, generated_aliases=generated_aliases)
+        route_profile, context_bucket = self._route_memory_key(request)
+        candidates = self._prioritize_remembered_candidate(
+            candidates=candidates,
+            resolved_alias=resolved_alias,
+            profile=route_profile,
+            context_bucket=context_bucket,
+        )
         selection_strategy = config.routing.default_strategy
         if resolved_alias and resolved_alias in config.routes.aliases:
             selection_strategy = config.routes.aliases[resolved_alias].strategy
@@ -481,6 +593,13 @@ class RoutingEngine:
                         )
                         decision.selected_provider = candidate.provider
                         decision.selected_key_id = key.id
+                        self._remember_successful_candidate(
+                            resolved_alias=resolved_alias,
+                            profile=route_profile,
+                            context_bucket=context_bucket,
+                            candidate=candidate,
+                            latency_ms=latency_ms,
+                        )
 
                         async def with_first_chunk() -> AsyncIterator[bytes]:
                             yield first_chunk
@@ -626,7 +745,7 @@ class RoutingEngine:
         if cooldown_error is not None:
             raise cooldown_error
         if not candidate_details:
-            for candidate in self._diagnostic_candidates(config, request, candidates):
+            for candidate in self._diagnostic_candidates(config, request, candidates, generated_aliases):
                 provider = config.providers.get(candidate.provider)
                 if provider is None:
                     candidate_details.append(self._candidate_detail(candidate, "skipped", "provider_not_configured"))

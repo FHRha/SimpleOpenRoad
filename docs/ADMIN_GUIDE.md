@@ -153,9 +153,9 @@ User API header:
 
 OpenAI-compatible plugin settings:
 - Base URL: `http://<SERVER_IP>:12345/v1`
-- Default model: `auto/smart`
-- Other default aliases: `auto/fast`, `auto/balanced`, `auto/strong`, `auto/code`
-- `auto/smart` uses a local heuristic, not an extra LLM request, to pick a candidate by request size, output budget, and code/reasoning hints.
+- Recommended model: `auto/general`
+- Other generated aliases: `auto/fast`, `auto/free`, `auto/reasoning`, `auto/code`
+- Generated aliases are built from the current provider inventory and available keys.
 - Direct model format: `provider/model` or an exact model id such as `gpt-5.4-mini`
 
 Admin header:

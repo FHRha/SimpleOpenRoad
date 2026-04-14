@@ -75,6 +75,24 @@ async def test_github_models_lists_catalog_models() -> None:
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_github_models_lists_catalog_models_when_api_returns_root_array() -> None:
+    respx.get("https://models.github.ai/catalog/models").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": "openai/gpt-4.1"},
+                {"name": "azureml/Phi-4-reasoning"},
+            ],
+        )
+    )
+
+    models = await _adapter().list_models(KeyConfig(id="github-main", key="github-token"))
+
+    assert models == ["openai/gpt-4.1", "azureml/Phi-4-reasoning"]
+
+
+@pytest.mark.asyncio
 async def test_github_models_rejects_responses_endpoint() -> None:
     with pytest.raises(GatewayError) as exc_info:
         await _adapter().responses(

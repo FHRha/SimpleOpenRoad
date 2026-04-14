@@ -60,10 +60,12 @@ class SuccessAdapter(ProviderAdapter):
         return iterator()
 
     async def validate_key(self, key) -> dict:  # type: ignore[override]
-        return {"status": "valid", "models": ["m1"], "error_code": None, "error_message": None}
+        return {"status": "valid", "models": await self.list_models(key), "error_code": None, "error_message": None}
 
     async def list_models(self, key) -> list[str]:  # type: ignore[override]
-        return ["m1"]
+        if self.provider_name == "openrouter":
+            return ["openai/gpt-4o-mini"]
+        return ["gpt-4.1-mini"]
 
 
 class UnsupportedModelAdapter(SuccessAdapter):
@@ -148,10 +150,6 @@ def _write_config(tmp_path: Path, require_auth: bool = True) -> Path:
                         {"provider": "openrouter", "model": "gpt-4o-mini"},
                     ],
                 },
-                "auto/balanced": {
-                    "strategy": "strict_priority",
-                    "candidates": [{"provider": "openrouter", "model": "openai/gpt-4o"}],
-                },
             }
         },
         "storage": {"sqlite_path": str(tmp_path / "gateway.db")},
@@ -179,6 +177,7 @@ def _patch_adapters(app, github_adapter: ProviderAdapter, openrouter_adapter: Pr
         "openrouter": openrouter_adapter,
     }
     container.health_checker.providers = container.routing_engine.providers
+    container.inventory_discovery.refresh_providers(container.routing_engine.providers)
 
 
 def _provider_cfg(app, name: str) -> ProviderConfig:
@@ -212,17 +211,21 @@ def test_openai_models_lists_aliases_and_direct_provider_models(monkeypatch, tmp
     monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
 
     app = create_app()
+    _patch_adapters(
+        app,
+        SuccessAdapter(provider_name="github", config=_provider_cfg(app, "github")),
+        SuccessAdapter(provider_name="openrouter", config=_provider_cfg(app, "openrouter")),
+    )
 
     with TestClient(app) as client:
         response = client.get("/v1/models", headers={"Authorization": "Bearer master-key"})
 
     assert response.status_code == 200
     model_ids = [item["id"] for item in response.json()["data"]]
+    assert "auto/general" in model_ids
     assert "auto/fast" in model_ids
-    assert "auto/balanced" in model_ids
     assert "github/gpt-4.1-mini" in model_ids
-    assert "openrouter/gpt-4o-mini" in model_ids
-    assert "auto/fallback" not in model_ids
+    assert "openrouter/openai/gpt-4o-mini" in model_ids
 
 
 def test_chat_responses_and_stream_with_mocked_provider(monkeypatch, tmp_path: Path) -> None:
@@ -249,6 +252,8 @@ def test_chat_responses_and_stream_with_mocked_provider(monkeypatch, tmp_path: P
         )
         assert chat.status_code == 200
         assert chat.headers.get("x-request-id")
+        assert chat.headers.get("x-sor-selected-model") == "github/gpt-4.1-mini"
+        assert chat.headers.get("x-sor-failed-candidates") is None
         assert chat.json()["choices"][0]["message"]["content"] == "hello"
 
         responses = client.post(
@@ -277,6 +282,34 @@ def test_chat_responses_and_stream_with_mocked_provider(monkeypatch, tmp_path: P
             assert "data: [DONE]" in body
 
 
+def test_chat_headers_show_selected_and_failed_candidates(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, require_auth=True)
+    monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MASTER_API_KEY", "master-key")
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
+
+    app = create_app()
+    _patch_adapters(
+        app,
+        UnsupportedModelAdapter(provider_name="github", config=_provider_cfg(app, "github")),
+        SuccessAdapter(provider_name="openrouter", config=_provider_cfg(app, "openrouter")),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"x-api-key": "master-key"},
+            json={
+                "model": "auto/fast",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers.get("x-sor-selected-model") == "openrouter/openai/gpt-4o-mini"
+    assert response.headers.get("x-sor-failed-candidates") == "github/gpt-4.1-mini"
+
+
 def test_chat_accepts_cline_style_openai_payload(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_config(tmp_path, require_auth=True)
     monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
@@ -293,7 +326,7 @@ def test_chat_accepts_cline_style_openai_payload(monkeypatch, tmp_path: Path) ->
             "/v1/chat/completions",
             headers={"x-api-key": "master-key"},
             json={
-                "model": "auto/fast",
+                "model": "gpt-4.1-mini",
                 "messages": [
                     {
                         "role": "user",
@@ -342,7 +375,7 @@ def test_responses_accepts_structured_openai_payload(monkeypatch, tmp_path: Path
             "/v1/responses",
             headers={"x-api-key": "master-key"},
             json={
-                "model": "auto/smart",
+                "model": "auto/general",
                 "input": [
                     {
                         "role": "user",
@@ -400,7 +433,7 @@ def test_failover_switches_to_next_provider(monkeypatch, tmp_path: Path) -> None
         )
         assert response.status_code == 200
         payload = response.json()
-        assert payload["model"] == "openrouter/gpt-4o-mini"
+        assert payload["model"] == "openrouter/openai/gpt-4o-mini"
 
         with app.state.container.attempts_repo.db.connection() as conn:
             rows = conn.execute(
@@ -431,7 +464,7 @@ def test_503_includes_route_candidate_diagnostics(monkeypatch, tmp_path: Path) -
             "/v1/chat/completions",
             headers={"x-api-key": "master-key"},
             json={
-                "model": "auto/fast",
+                "model": "gpt-4.1-mini",
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )

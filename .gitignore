@@ -12,6 +12,10 @@ pytest_tmp/
 coverage.xml
 htmlcov/
 dist/
+build/
+local-build/
+.local-build/
+release-test/
 *.log
 data/*.db
 data/*.db-shm

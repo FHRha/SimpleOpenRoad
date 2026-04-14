@@ -75,6 +75,7 @@ _PLACEHOLDER_ENV_VALUES = {
     "change-me-admin-key",
     "",
 }
+_GENERATED_ALIAS_PREFIX = "auto/"
 
 
 @cli_app.callback()
@@ -149,6 +150,10 @@ def _show_settings_summary(config_path: str) -> None:
     table.add_row("observability.router_decision_log", str(cfg.observability.router_decision_log))
     table.add_row("model_capabilities.tool_capable", ", ".join(cfg.model_capabilities.tool_capable) or "<empty>")
     table.add_row("model_capabilities.tool_disabled", ", ".join(cfg.model_capabilities.tool_disabled) or "<empty>")
+    table.add_row("inventory.refresh_time", cfg.inventory.refresh_time)
+    table.add_row("inventory.refresh_timezone", cfg.inventory.refresh_timezone)
+    table.add_row("inventory.refresh_interval_hours", str(cfg.inventory.refresh_interval_hours))
+    table.add_row("inventory.overrides", str(len(cfg.inventory.overrides)))
     console.print(table)
 
 
@@ -179,6 +184,37 @@ def _prompt_menu_choice(prompt: str = "Select option", default: str = "1") -> st
         return typer.prompt(prompt, default=default).strip()
     except Abort:
         return "0"
+
+
+def _print_key_validation_results(results: list[dict[str, Any]], title: str = "Key Validation") -> None:
+    table = Table(title=title, box=box.ASCII)
+    table.add_column("Provider")
+    table.add_column("Key ID")
+    table.add_column("Status")
+    table.add_column("Latency ms")
+    table.add_column("Models")
+    table.add_column("Error")
+    if not results:
+        table.add_row("-", "-", "<empty>", "-", "-", "-")
+        console.print(table)
+        return
+    for row in results:
+        latency = row.get("latency_ms")
+        if latency is None:
+            latency_text = "-"
+        else:
+            latency_text = f"{float(latency):.2f}"
+        models = row.get("models") if isinstance(row, dict) else []
+        model_count = len(models) if isinstance(models, list) else 0
+        table.add_row(
+            str(row.get("provider", "")),
+            str(row.get("key_id", "")),
+            str(row.get("status", "")),
+            latency_text,
+            str(model_count),
+            str(row.get("error_code") or row.get("error_message") or "-")[:120],
+        )
+    console.print(table)
 
 
 def _load_env_file(env_path: Path = Path(".env")) -> dict[str, str]:
@@ -271,40 +307,204 @@ def _resolve_api_base_url(cfg: GatewayConfig) -> str:
     return f"http://{_detect_server_ip()}:{cfg.server.port}"
 
 
-def _format_model_aliases(cfg: GatewayConfig) -> str:
-    aliases = list(cfg.routes.aliases)
+def _current_inventory_snapshot(config_path: str, refresh: bool = False) -> dict[str, Any] | None:
+    import asyncio
+
+    container = _container(config_path)
+    if refresh:
+        return asyncio.run(container.admin_service.refresh_inventory())
+    return container.admin_service.current_inventory()
+
+
+def _generated_alias_ids(snapshot: dict[str, Any] | None) -> list[str]:
+    if not isinstance(snapshot, dict):
+        return []
+    aliases = snapshot.get("generated_aliases", [])
+    if not isinstance(aliases, list):
+        return []
+    result: list[str] = []
+    for item in aliases:
+        if not isinstance(item, dict):
+            continue
+        alias_id = str(item.get("alias_id", "")).strip()
+        if alias_id:
+            result.append(alias_id)
+    return result
+
+
+def _generated_alias_map(snapshot: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not isinstance(snapshot, dict):
+        return result
+    aliases = snapshot.get("generated_aliases", [])
+    if not isinstance(aliases, list):
+        return result
+    for item in aliases:
+        if not isinstance(item, dict):
+            continue
+        alias_id = str(item.get("alias_id", "")).strip()
+        if alias_id:
+            result[alias_id] = item
+    return result
+
+
+def _format_model_aliases(cfg: GatewayConfig, snapshot: dict[str, Any] | None = None) -> str:
+    aliases = _generated_alias_ids(snapshot)
+    if not aliases:
+        aliases = list(cfg.routes.aliases)
     return ", ".join(aliases) if aliases else "<no aliases configured>"
 
 
-def _recommended_model_alias(cfg: GatewayConfig) -> str:
-    aliases = cfg.routes.aliases
-    if "auto/smart" in aliases:
-        return "auto/smart"
+def _recommended_model_alias(cfg: GatewayConfig, snapshot: dict[str, Any] | None = None) -> str:
+    aliases = set(_generated_alias_ids(snapshot) or list(cfg.routes.aliases))
+    if "auto/general" in aliases:
+        return "auto/general"
     if "auto/fast" in aliases:
         return "auto/fast"
-    return next(iter(aliases), "<no aliases configured>")
+    if "auto/code" in aliases:
+        return "auto/code"
+    return next(iter(aliases), "")
 
 
-def _model_alias_help_rows(cfg: GatewayConfig) -> list[tuple[str, str]]:
+def _model_alias_help_rows(cfg: GatewayConfig, snapshot: dict[str, Any] | None = None) -> list[tuple[str, str]]:
     descriptions = {
-        "auto/smart": "recommended default; local heuristic chooses fast/balanced/strong/code candidates",
+        "auto/free": "free-capable routes only when available",
         "auto/fast": "lightweight, cheap, low-latency tasks",
-        "auto/balanced": "general chat and medium tasks with better quality",
-        "auto/strong": "hard reasoning, long context, complex analysis",
+        "auto/general": "recommended default for general chat and everyday use",
+        "auto/reasoning": "hard reasoning, long context, complex analysis",
         "auto/code": "coding, debugging, refactoring, repository work",
+        "auto/text/free": "canonical text alias for free-capable routes",
+        "auto/text/fast": "canonical text alias for lightweight tasks",
+        "auto/text/general": "canonical text alias for general chat",
+        "auto/text/reasoning": "canonical text alias for hard reasoning",
+        "auto/text/code": "canonical text alias for coding tasks",
+        "auto/image/default": "image-capable models discovered in provider inventory",
+        "auto/video/default": "video-capable models discovered in provider inventory",
+        "auto/audio/default": "audio-capable models discovered in provider inventory",
     }
     rows: list[tuple[str, str]] = []
-    for alias in cfg.routes.aliases:
-        rows.append((alias, descriptions.get(alias, "custom route alias from config.yaml")))
+    aliases = _generated_alias_ids(snapshot)
+    if aliases:
+        for alias in aliases:
+            rows.append((alias, descriptions.get(alias, "generated from current provider inventory")))
+    else:
+        for alias in cfg.routes.aliases:
+            rows.append((alias, descriptions.get(alias, "custom route alias from config.yaml")))
     return rows
 
 
-def _print_alias_help_table(cfg: GatewayConfig) -> None:
+def _print_alias_help_table(cfg: GatewayConfig, snapshot: dict[str, Any] | None = None) -> None:
     table = Table(title="Model Alias Guide", box=box.ASCII)
     table.add_column("Alias")
     table.add_column("Use for")
-    for alias, description in _model_alias_help_rows(cfg):
+    for alias, description in _model_alias_help_rows(cfg, snapshot):
         table.add_row(alias, description)
+    console.print(table)
+
+
+def _select_test_alias(config_path: str) -> str | None:
+    cfg = load_gateway_config(config_path=config_path)
+    snapshot = _current_inventory_snapshot(config_path, refresh=False)
+    if not _generated_alias_ids(snapshot):
+        snapshot = _current_inventory_snapshot(config_path, refresh=True)
+    generated_aliases = _generated_alias_ids(snapshot)
+    alias_descriptions = dict(_model_alias_help_rows(cfg, snapshot))
+
+    preferred_aliases = ("auto/fast", "auto/free", "auto/general", "auto/reasoning", "auto/code")
+    alias_options: list[str] = []
+    seen: set[str] = set()
+    for alias in preferred_aliases:
+        if alias in generated_aliases and alias not in seen:
+            alias_options.append(alias)
+            seen.add(alias)
+    for alias in generated_aliases:
+        if alias.startswith("auto/text/"):
+            continue
+        if alias not in seen and alias.startswith("auto/"):
+            alias_options.append(alias)
+            seen.add(alias)
+    for alias in cfg.routes.aliases:
+        if alias not in seen:
+            alias_options.append(alias)
+            seen.add(alias)
+
+    if not alias_options:
+        console.print("No generated or custom aliases are available. Add provider keys, validate them, then refresh inventory.")
+        return None
+
+    table = Table(title="Select Alias for Automatic API Test", box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Alias")
+    table.add_column("Use for")
+    for index, alias in enumerate(alias_options, start=1):
+        table.add_row(str(index), alias, alias_descriptions.get(alias, "generated from current provider inventory"))
+    table.add_row("M", "Manual input", "enter custom alias or direct model")
+    table.add_row("0", "Back", "cancel automatic test")
+    console.print(table)
+
+    choice = _prompt_menu_choice(prompt="Alias to test", default="1")
+    if choice == "0":
+        return None
+    if choice.lower() == "m":
+        default_model = _recommended_model_alias(cfg, snapshot) or "provider/model"
+        manual_value = typer.prompt("Model or alias", default=default_model).strip()
+        if manual_value.startswith(_GENERATED_ALIAS_PREFIX) and manual_value not in generated_aliases:
+            raise typer.BadParameter(f"Generated alias is not available in current inventory: {manual_value}")
+        return manual_value
+
+    selected = int(choice)
+    if selected < 1 or selected > len(alias_options):
+        raise typer.BadParameter(f"Choose a number between 1 and {len(alias_options)}, M, or 0")
+    return alias_options[selected - 1]
+
+
+def _print_generated_aliases_table(snapshot: dict[str, Any] | None) -> None:
+    table = Table(title="Generated Aliases", box=box.ASCII)
+    table.add_column("Alias")
+    table.add_column("Modality")
+    table.add_column("Scope")
+    table.add_column("Category")
+    table.add_column("Candidates")
+    aliases = []
+    if isinstance(snapshot, dict):
+        raw_aliases = snapshot.get("generated_aliases", [])
+        if isinstance(raw_aliases, list):
+            aliases = [item for item in raw_aliases if isinstance(item, dict)]
+    if not aliases:
+        table.add_row("-", "-", "-", "-", "<empty>")
+        console.print(table)
+        return
+    for item in aliases:
+        candidate_labels = []
+        for candidate in item.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            provider = str(candidate.get("provider", "")).strip()
+            model_id = str(candidate.get("model_id", "")).strip()
+            if provider and model_id:
+                candidate_labels.append(f"{provider}/{model_id}")
+        table.add_row(
+            str(item.get("alias_id", "")),
+            str(item.get("modality", "")),
+            str(item.get("scope", "")),
+            str(item.get("category", "")),
+            " -> ".join(candidate_labels[:4]) or "<empty>",
+        )
+    console.print(table)
+
+
+def _print_custom_aliases_table(cfg: GatewayConfig) -> None:
+    table = Table(title="Custom Aliases (config.yaml)", box=box.ASCII)
+    table.add_column("Alias")
+    table.add_column("Strategy")
+    table.add_column("Candidates")
+    if not cfg.routes.aliases:
+        table.add_row("-", "-", "<empty>")
+        console.print(table)
+        return
+    for alias, route in cfg.routes.aliases.items():
+        candidates = " -> ".join(f"{c.provider}/{c.model}" for c in route.candidates) or "<empty>"
+        table.add_row(alias, route.strategy, candidates)
     console.print(table)
 
 
@@ -317,7 +517,20 @@ def _runtime_key_registry(cfg: GatewayConfig) -> KeyRegistry:
     return registry
 
 
-def _alias_raw_candidates(cfg: GatewayConfig, model: str) -> list[RouteCandidate]:
+def _alias_raw_candidates(
+    cfg: GatewayConfig,
+    model: str,
+    snapshot: dict[str, Any] | None = None,
+) -> list[RouteCandidate]:
+    generated_alias = _generated_alias_map(snapshot).get(model)
+    if generated_alias is not None:
+        return [
+            RouteCandidate(provider=str(candidate.get("provider", "")), model=str(candidate.get("model_id", "")))
+            for candidate in generated_alias.get("candidates", [])
+            if isinstance(candidate, dict)
+            and str(candidate.get("provider", "")).strip()
+            and str(candidate.get("model_id", "")).strip()
+        ]
     if model in cfg.routes.aliases:
         return [RouteCandidate(provider=c.provider, model=c.model) for c in cfg.routes.aliases[model].candidates]
     if "/" in model:
@@ -447,24 +660,52 @@ def _extract_candidate_diagnostics(response: httpx.Response) -> list[dict]:
 
 def _print_route_preview(config_path: str, model: str | None = None) -> None:
     cfg = load_gateway_config(config_path=config_path)
+    snapshot = _current_inventory_snapshot(config_path, refresh=True)
     registry = _runtime_key_registry(cfg)
     runtime_map = {item["key_id"]: item for item in registry.runtime_repo.list_states()}
-    aliases = list(cfg.routes.aliases)
+    aliases = _generated_alias_ids(snapshot) or list(cfg.routes.aliases)
     if model is None:
         if aliases:
             _print_numbered_items("Route aliases", aliases)
             selected = _prompt_numbered_choice(len(aliases), "Alias number")
             model = aliases[selected - 1]
         else:
-            model = typer.prompt("Model or alias", default="auto/fast").strip()
+            model = typer.prompt("Model or alias", default="auto/general").strip()
 
     request = UnifiedLLMRequest(
         model=model,
         messages=[ChatMessage(role="user", content="hello")],
         metadata={"sor_profile": "fast"},
     )
-    planned, alias = plan_candidates(cfg, request)
-    raw_candidates = _alias_raw_candidates(cfg, model)
+    generated_aliases = []
+    if isinstance(snapshot, dict):
+        raw_generated = snapshot.get("generated_aliases", [])
+        if isinstance(raw_generated, list):
+            from app.inventory.models import GeneratedAlias, GeneratedAliasCandidate
+
+            generated_aliases = [
+                GeneratedAlias(
+                    alias_id=str(item.get("alias_id", "")),
+                    scope=str(item.get("scope", "global")),
+                    modality=str(item.get("modality", "text")),
+                    category=str(item.get("category", "")),
+                    provider_scope=item.get("provider_scope"),
+                    candidates=[
+                        GeneratedAliasCandidate(
+                            provider=str(candidate.get("provider", "")),
+                            model_id=str(candidate.get("model_id", "")),
+                            candidate_type=str(candidate.get("candidate_type", "model")),
+                        )
+                        for candidate in item.get("candidates", [])
+                        if isinstance(candidate, dict)
+                    ],
+                    generation_reason=str(item.get("generation_reason", "")),
+                )
+                for item in raw_generated
+                if isinstance(item, dict)
+            ]
+    planned, alias = plan_candidates(cfg, request, generated_aliases=generated_aliases)
+    raw_candidates = _alias_raw_candidates(cfg, model, snapshot)
     planned_keys = {(candidate.provider, candidate.model) for candidate in planned}
 
     summary = Table(title="Route Preview", box=box.ASCII)
@@ -578,9 +819,10 @@ def _print_troubleshooting_guide() -> None:
 
 def _print_openai_client_examples(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
+    snapshot = _current_inventory_snapshot(config_path, refresh=False)
     api_base = _resolve_api_base_url(cfg)
     openai_base = f"{api_base}/v1"
-    model = _recommended_model_alias(cfg)
+    model = _recommended_model_alias(cfg, snapshot)
     table = Table(title="OpenAI-Compatible Client Setup", box=box.ASCII)
     table.add_column("Field")
     table.add_column("Value")
@@ -589,13 +831,14 @@ def _print_openai_client_examples(config_path: str) -> None:
     table.add_row("Auth header", "Authorization: Bearer <MASTER_API_KEY>")
     table.add_row("Alternative header", "x-api-key: <MASTER_API_KEY>")
     table.add_row("Recommended model", model)
-    table.add_row("Other aliases", _format_model_aliases(cfg))
+    table.add_row("Other aliases", _format_model_aliases(cfg, snapshot))
     console.print(table)
     console.print("For Cline/OpenAI-compatible clients, use the Base URL with /v1 and one of the auto/... aliases.")
 
 
 def _print_quick_status(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
+    snapshot = _current_inventory_snapshot(config_path, refresh=False)
     configured_keys = [
         key
         for provider in cfg.providers.values()
@@ -611,8 +854,8 @@ def _print_quick_status(config_path: str) -> None:
     table.add_row("Public/OpenAI base", f"{_resolve_api_base_url(cfg)}/v1")
     table.add_row("Enabled providers", str(len(enabled_providers)))
     table.add_row("Active configured keys", str(len(configured_keys)))
-    table.add_row("Aliases", _format_model_aliases(cfg))
-    table.add_row("Recommended model", _recommended_model_alias(cfg))
+    table.add_row("Aliases", _format_model_aliases(cfg, snapshot))
+    table.add_row("Recommended model", _recommended_model_alias(cfg, snapshot))
     console.print(table)
 
 
@@ -628,6 +871,7 @@ def _run_setup_wizard(config_path: str) -> None:
 
 
 def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
+    snapshot = _current_inventory_snapshot(config_path, refresh=False)
     api_base = _resolve_api_base_url(cfg)
     openai_base = f"{api_base}/v1"
     console.print("Setup complete. Management and API endpoints:")
@@ -635,14 +879,14 @@ def _print_setup_summary(config_path: str, cfg: GatewayConfig) -> None:
     console.print("- OpenAI-compatible plugin settings:")
     console.print(f"  Base URL: {openai_base}")
     console.print("  API key: MASTER_API_KEY from .env or Gateway -> API access token and test")
-    console.print(f"  Models: {_format_model_aliases(cfg)}")
-    console.print(f"  Recommended default: {_recommended_model_alias(cfg)}")
+    console.print(f"  Models: {_format_model_aliases(cfg, snapshot)}")
+    console.print(f"  Recommended default: {_recommended_model_alias(cfg, snapshot)}")
     console.print("  Direct model format: provider/model or exact model id")
-    console.print("  Alias fallback: candidates are tried in order; providers without keys are skipped")
+    console.print("  Generated aliases are built from current provider inventory; direct provider/model ids also work")
     console.print(f"- Chat endpoint: {openai_base}/chat/completions")
     console.print(f"- Responses endpoint: {openai_base}/responses")
     console.print(f"- Health: {api_base}/health")
-    _print_alias_help_table(cfg)
+    _print_alias_help_table(cfg, snapshot)
 
 
 def _resolve_local_api_base_url(cfg: GatewayConfig) -> str:
@@ -660,6 +904,7 @@ def _current_master_api_key() -> str:
 
 def _print_api_access(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
+    snapshot = _current_inventory_snapshot(config_path, refresh=False)
     token = _current_master_api_key()
     api_base = _resolve_api_base_url(cfg)
     openai_base = f"{api_base}/v1"
@@ -678,13 +923,13 @@ def _print_api_access(config_path: str) -> None:
     table.add_row("Protection", "enabled" if cfg.security.require_master_key else "disabled")
     table.add_row("OpenAI-compatible Base URL", openai_base)
     table.add_row("Chat endpoint", f"{openai_base}/chat/completions")
-    table.add_row("Model aliases", _format_model_aliases(cfg))
+    table.add_row("Model aliases", _format_model_aliases(cfg, snapshot))
     table.add_row("Direct model", "provider/model or exact model id")
     table.add_row("MASTER_API_KEY", token if cfg.security.require_master_key else "<not required>")
     table.add_row("Header", "x-api-key: <MASTER_API_KEY>")
     table.add_row("Alt header", "Authorization: Bearer <MASTER_API_KEY>")
     console.print(table)
-    _print_alias_help_table(cfg)
+    _print_alias_help_table(cfg, snapshot)
     console.print("Use Gateway -> Test API request to run an automatic local check.")
 
 
@@ -729,6 +974,14 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
             if choices:
                 text = str(choices[0].get("message", {}).get("content", ""))
             table.add_row("Result", "ok")
+            selected_model = response.headers.get("x-sor-selected-model") or (
+                str(data.get("model", "")) if isinstance(data, dict) else ""
+            )
+            if selected_model:
+                table.add_row("Answered model", selected_model)
+            failed_candidates = response.headers.get("x-sor-failed-candidates", "").strip()
+            if failed_candidates:
+                table.add_row("Failed candidates", failed_candidates)
             table.add_row("Response", text[:300] or "<empty>")
         else:
             table.add_row("Result", "failed")
@@ -741,6 +994,13 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
                 table.add_row("Provider", str(detail.get("provider") or "<none>"))
                 table.add_row("Key ID", str(detail.get("key_id") or "<none>"))
             candidates = _extract_candidate_diagnostics(response)
+            failed_candidates = ", ".join(
+                f"{item.get('provider')}/{item.get('model')}"
+                for item in candidates
+                if item.get("provider") and item.get("model") and item.get("status") != "ready"
+            )
+            if failed_candidates:
+                table.add_row("Failed candidates", failed_candidates[:500])
             if candidates:
                 table.add_row("Diagnostics", "see Route Candidate Diagnostics below")
             elif response.text:
@@ -1100,6 +1360,20 @@ def _service_status_text(mode: str) -> str:
     return f"status={state}, enabled={enabled}"
 
 
+def _restart_service_after_update(mode: str = "system") -> bool:
+    if shutil.which("systemctl") is None:
+        console.print("Service restart skipped: systemctl not found.")
+        return False
+    try:
+        selected_mode = _service_mode(mode)
+        _run_systemctl(selected_mode, "restart", SERVICE_NAME, check=False)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"Service restart skipped: {exc}")
+        return False
+    console.print("Service restarted.")
+    return True
+
+
 def _guess_install_root(config_path: str) -> Path:
     cfg_path = Path(config_path).resolve()
     if not cfg_path.exists():
@@ -1382,6 +1656,144 @@ def providers_list(config_path: str = typer.Option("config/config.yaml", help="P
     console.print(table)
 
 
+@providers_app.command("inventory")
+def providers_inventory(
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+    refresh: bool = typer.Option(True, "--refresh/--cached", help="Refresh provider inventory before printing"),
+) -> None:
+    import asyncio
+
+    container = _container(config_path)
+    snapshot = (
+        asyncio.run(container.admin_service.refresh_inventory())
+        if refresh
+        else container.admin_service.current_inventory()
+    )
+    if snapshot is None:
+        console.print("Inventory snapshot is empty. Run with --refresh.")
+        return
+
+    summary = Table(title="Provider Inventory / Keys", box=box.ASCII)
+    summary.add_column("Provider")
+    summary.add_column("Key ID")
+    summary.add_column("Status")
+    summary.add_column("Models")
+    summary.add_column("Error")
+    key_results = snapshot.get("key_results", [])
+    if not key_results:
+        summary.add_row("-", "-", "<empty>", "0", "-")
+    else:
+        for item in key_results:
+            summary.add_row(
+                str(item.get("provider", "")),
+                str(item.get("key_id", "")),
+                str(item.get("status", "")),
+                str(item.get("discovered_models", "")),
+                str(item.get("error_code", "") or "-"),
+            )
+    console.print(summary)
+
+    classifications = {
+        (str(item.get("provider", "")), str(item.get("model_id", ""))): item
+        for item in snapshot.get("classifications", [])
+    }
+    models_table = Table(title="Provider Inventory / Models", box=box.ASCII)
+    models_table.add_column("Provider")
+    models_table.add_column("Model")
+    models_table.add_column("Modality")
+    models_table.add_column("Keys")
+    models_table.add_column("Free")
+    models_table.add_column("Preview")
+    models_table.add_column("Special")
+    models_table.add_column("Text")
+    models_table.add_column("Chat")
+    models_table.add_column("Responses")
+    models_table.add_column("Stream")
+    models_table.add_column("Tools")
+    models_table.add_column("Excluded")
+    models_table.add_column("Tags")
+    models_table.add_column("Scores")
+    models = snapshot.get("models", [])
+    if not models:
+        models_table.add_row("-", "<empty>", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-")
+    else:
+        for item in models:
+            classification = classifications.get((str(item.get("provider", "")), str(item.get("model_id", ""))), {})
+            scores = "/".join(
+                [
+                    f"f{classification.get('free_score', 0)}",
+                    f"fa{classification.get('fast_score', 0)}",
+                    f"g{classification.get('general_score', 0)}",
+                    f"r{classification.get('reasoning_score', 0)}",
+                    f"c{classification.get('code_score', 0)}",
+                ]
+            )
+            models_table.add_row(
+                str(item.get("provider", "")),
+                str(item.get("model_id", "")),
+                str(item.get("modality", "")),
+                ", ".join(str(value) for value in item.get("source_key_ids", [])) or "-",
+                "yes" if item.get("is_free") else "no",
+                "yes" if item.get("is_preview") else "no",
+                "yes" if item.get("is_special") else "no",
+                "yes" if item.get("is_text_candidate") else "no",
+                str(item.get("chat_state", "-")),
+                str(item.get("responses_state", "-")),
+                str(item.get("stream_state", "-")),
+                str(item.get("tools_state", "-")),
+                str(item.get("excluded_reason", "") or "-"),
+                ", ".join(str(value) for value in classification.get("classification_tags", [])) or "-",
+                scores,
+            )
+    console.print(models_table)
+
+    special_routes = snapshot.get("special_routes", [])
+    special_routes_table = Table(title="Provider Inventory / Special Routes", box=box.ASCII)
+    special_routes_table.add_column("Provider")
+    special_routes_table.add_column("Route")
+    special_routes_table.add_column("Modality")
+    special_routes_table.add_column("Tools")
+    special_routes_table.add_column("Hints")
+    if not special_routes:
+        special_routes_table.add_row("-", "<empty>", "-", "-", "-")
+    else:
+        for item in special_routes:
+            special_routes_table.add_row(
+                str(item.get("provider", "")),
+                str(item.get("route_id", "")),
+                str(item.get("modality", "")),
+                "yes" if item.get("supports_tools") else "no",
+                ", ".join(str(value) for value in item.get("category_hints", [])) or "-",
+            )
+    console.print(special_routes_table)
+
+    generated_aliases = snapshot.get("generated_aliases", [])
+    aliases_table = Table(title="Provider Inventory / Generated Aliases", box=box.ASCII)
+    aliases_table.add_column("Alias")
+    aliases_table.add_column("Modality")
+    aliases_table.add_column("Scope")
+    aliases_table.add_column("Category")
+    aliases_table.add_column("Candidates")
+    aliases_table.add_column("Preview")
+    if not generated_aliases:
+        aliases_table.add_row("-", "-", "-", "-", "0", "<empty>")
+    else:
+        for item in generated_aliases:
+            candidates = item.get("candidates", [])
+            preview = ", ".join(
+                f"{candidate.get('provider')}/{candidate.get('model_id')}" for candidate in candidates[:3]
+            ) or "-"
+            aliases_table.add_row(
+                str(item.get("alias_id", "")),
+                str(item.get("modality", "")),
+                str(item.get("scope", "")),
+                str(item.get("category", "")),
+                str(len(candidates)),
+                preview,
+            )
+    console.print(aliases_table)
+
+
 @providers_app.command("test")
 def providers_test(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
     import asyncio
@@ -1480,7 +1892,7 @@ def keys_add(
 
         container = _container(str(path))
         result = asyncio.run(container.admin_service.validate_key(provider=provider, key_id=key_id))
-        console.print(result)
+        _print_key_validation_results([result], title="Key Validation")
 
 
 @keys_app.command("wizard")
@@ -1522,12 +1934,11 @@ def keys_validate(
     container = _container(config_path)
     if provider and key_id:
         result = asyncio.run(container.admin_service.validate_key(provider=provider, key_id=key_id))
-        console.print(result)
+        _print_key_validation_results([result], title="Key Validation")
         return
 
     results = asyncio.run(container.admin_service.validate_all_keys())
-    for row in results:
-        console.print(row)
+    _print_key_validation_results(results, title="Key Validation")
 
 
 @keys_app.command("enable")
@@ -1553,14 +1964,9 @@ def keys_disable(
 @routes_app.command("list")
 def routes_list(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
     cfg = load_gateway_config(config_path=config_path)
-    table = Table(title="Route Aliases")
-    table.add_column("Alias")
-    table.add_column("Strategy")
-    table.add_column("Candidates")
-    for alias, route in cfg.routes.aliases.items():
-        candidates = " -> ".join(f"{c.provider}/{c.model}" for c in route.candidates)
-        table.add_row(alias, route.strategy, candidates)
-    console.print(table)
+    snapshot = _current_inventory_snapshot(config_path=config_path, refresh=False)
+    _print_generated_aliases_table(snapshot)
+    _print_custom_aliases_table(cfg)
 
 
 @routes_app.command("preview")
@@ -1664,6 +2070,7 @@ def _run_update(
     install_dir: str | None = None,
     bin_dir: str | None = None,
     yes: bool = False,
+    restart_service: bool = True,
 ) -> None:
     if version and ref:
         raise typer.BadParameter("Use either --version or --ref, not both")
@@ -1717,6 +2124,8 @@ def _run_update(
     )
     _run_streaming_command(command)
     console.print("Update complete. User settings were preserved.")
+    if restart_service:
+        _restart_service_after_update(mode="system")
 
 
 @cli_app.command("update")
@@ -1731,6 +2140,7 @@ def update(
     install_dir: str | None = typer.Option(None, help="Installed package directory"),
     bin_dir: str | None = typer.Option(None, help="Directory containing sor wrapper"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Do not prompt for confirmation"),
+    no_restart: bool = typer.Option(False, "--no-restart", help="Do not restart the system service after update"),
 ) -> None:
     _run_update(
         config_path=config_path,
@@ -1743,6 +2153,7 @@ def update(
         install_dir=install_dir,
         bin_dir=bin_dir,
         yes=yes,
+        restart_service=not no_restart,
     )
 
 
@@ -2012,6 +2423,7 @@ def _run_capabilities_panel(config_path: str) -> None:
                 "2) Edit tool_capable patterns",
                 "3) Edit tool_disabled patterns",
                 "4) Reset capability patterns to defaults",
+                "5) Inventory overrides",
                 "0) Back",
             ],
         )
@@ -2033,6 +2445,69 @@ def _run_capabilities_panel(config_path: str) -> None:
                 )
                 console.print("Reset model_capabilities to defaults")
                 _pause()
+            elif choice == "5":
+                _run_inventory_overrides_panel(config_path=config_path)
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
+def _run_inventory_schedule_panel(config_path: str) -> None:
+    while True:
+        cfg = load_gateway_config(config_path=config_path)
+        _print_menu(
+            title="SimpleOpenRoad / Settings / Inventory Refresh",
+            config_path=config_path,
+            lines=[
+                f"1) Set refresh time (current: {cfg.inventory.refresh_time})",
+                f"2) Set refresh timezone (current: {cfg.inventory.refresh_timezone})",
+                f"3) Set refresh interval hours (current: {cfg.inventory.refresh_interval_hours})",
+                "4) Reset schedule to defaults",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                value = typer.prompt("inventory.refresh_time (HH:MM)", default=cfg.inventory.refresh_time).strip()
+                _update_config_value(config_path, value, "inventory", "refresh_time")
+                load_gateway_config(config_path=config_path)
+                console.print(f"Updated inventory.refresh_time: {value}")
+                _pause()
+            elif choice == "2":
+                value = typer.prompt(
+                    "inventory.refresh_timezone",
+                    default=cfg.inventory.refresh_timezone,
+                ).strip()
+                _update_config_value(config_path, value, "inventory", "refresh_timezone")
+                console.print(f"Updated inventory.refresh_timezone: {value}")
+                _pause()
+            elif choice == "3":
+                value = typer.prompt(
+                    "inventory.refresh_interval_hours",
+                    default=str(cfg.inventory.refresh_interval_hours),
+                ).strip()
+                _update_config_value(config_path, int(value), "inventory", "refresh_interval_hours")
+                load_gateway_config(config_path=config_path)
+                console.print(f"Updated inventory.refresh_interval_hours: {value}")
+                _pause()
+            elif choice == "4":
+                defaults = GatewayConfig().inventory
+                _update_config_value(config_path, defaults.refresh_time, "inventory", "refresh_time")
+                _update_config_value(config_path, defaults.refresh_timezone, "inventory", "refresh_timezone")
+                _update_config_value(
+                    config_path,
+                    defaults.refresh_interval_hours,
+                    "inventory",
+                    "refresh_interval_hours",
+                )
+                console.print("Reset inventory refresh schedule to defaults")
+                _pause()
             elif choice == "0":
                 return
             else:
@@ -2047,9 +2522,9 @@ def _select_alias_name(config_path: str) -> str | None:
     cfg = load_gateway_config(config_path=config_path)
     aliases = list(cfg.routes.aliases)
     if not aliases:
-        console.print("No aliases configured")
+        console.print("No custom aliases configured")
         return None
-    _print_numbered_items("Route Aliases", aliases)
+    _print_numbered_items("Custom Aliases", aliases)
     selected = _prompt_numbered_choice(len(aliases), "Alias number")
     return aliases[selected - 1]
 
@@ -2071,6 +2546,36 @@ def _show_alias_candidates(config_path: str, alias_name: str) -> list[dict[str, 
     return candidates
 
 
+def _create_custom_alias(config_path: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    aliases = data.setdefault("routes", {}).setdefault("aliases", {})
+    alias_name = typer.prompt("New custom alias", default="custom/my-route").strip()
+    if not alias_name:
+        raise typer.BadParameter("Alias cannot be empty")
+    if alias_name in aliases:
+        raise typer.BadParameter(f"Alias already exists: {alias_name}")
+    aliases[alias_name] = {
+        "strategy": "strict_priority",
+        "selection": "ordered",
+        "candidates": [],
+    }
+    _save_yaml(path, data)
+    console.print(f"Created custom alias: {alias_name}")
+
+
+def _remove_custom_alias(config_path: str) -> None:
+    alias_name = _select_alias_name(config_path)
+    if alias_name is None:
+        return
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    aliases = data.setdefault("routes", {}).setdefault("aliases", {})
+    aliases.pop(alias_name, None)
+    _save_yaml(path, data)
+    console.print(f"Removed custom alias: {alias_name}")
+
+
 def _select_provider_name(config_path: str) -> str:
     cfg = load_gateway_config(config_path=config_path)
     provider_names = list(cfg.providers)
@@ -2085,6 +2590,160 @@ def _select_option_from_list(title: str, options: list[str], prompt: str) -> str
     _print_numbered_items(title, options)
     selected = _prompt_numbered_choice(len(options), prompt)
     return options[selected - 1]
+
+
+def _parse_optional_bool(value: str) -> bool | None:
+    normalized = value.strip().lower()
+    if normalized in {"", "skip", "none"}:
+        return None
+    if normalized in {"true", "yes", "y", "1"}:
+        return True
+    if normalized in {"false", "no", "n", "0"}:
+        return False
+    raise typer.BadParameter("Use true, false, or skip")
+
+
+def _show_inventory_overrides(config_path: str) -> list[dict[str, Any]]:
+    cfg = load_gateway_config(config_path=config_path)
+    table = Table(title="Inventory Overrides", box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Provider")
+    table.add_column("Pattern")
+    table.add_column("Mode")
+    table.add_column("Categories")
+    table.add_column("Tools")
+    table.add_column("Reason")
+    rows = [item.model_dump(exclude_none=True) for item in cfg.inventory.overrides]
+    if not rows:
+        table.add_row("-", "*", "<empty>", "-", "-", "-", "-")
+    else:
+        for index, item in enumerate(rows, start=1):
+            mode_parts: list[str] = []
+            if item.get("force_include"):
+                mode_parts.append("include")
+            if item.get("force_exclude"):
+                mode_parts.append("exclude")
+            if item.get("force_modality"):
+                mode_parts.append(f"modality={item['force_modality']}")
+            tool_parts: list[str] = []
+            if "force_tool_capable" in item:
+                tool_parts.append(f"capable={item['force_tool_capable']}")
+            if "force_tool_disabled" in item:
+                tool_parts.append(f"disabled={item['force_tool_disabled']}")
+            table.add_row(
+                str(index),
+                str(item.get("provider") or "*"),
+                str(item.get("model_pattern", "")),
+                ", ".join(mode_parts) or "-",
+                ", ".join(item.get("force_categories", [])) or "-",
+                ", ".join(tool_parts) or "-",
+                str(item.get("reason", "") or "-"),
+            )
+    console.print(table)
+    return rows
+
+
+def _add_inventory_override(config_path: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    provider = typer.prompt("Provider pattern", default="*").strip()
+    model_pattern = typer.prompt("Model pattern", default="*").strip()
+    if not model_pattern:
+        raise typer.BadParameter("Model pattern cannot be empty")
+    force_include = typer.confirm("Force include matching models", default=False)
+    force_exclude = typer.confirm("Force exclude matching models", default=False)
+    force_modality_raw = typer.prompt(
+        "Force modality [text/image/video/audio/embedding/other/skip]",
+        default="skip",
+    ).strip().lower()
+    force_modality = None if force_modality_raw in {"", "skip", "none"} else force_modality_raw
+    categories_raw = typer.prompt(
+        "Force categories (comma-separated: free,fast,general,reasoning,code)",
+        default="",
+    ).strip()
+    force_categories = [item for item in _parse_pattern_list(categories_raw) if item in {"free", "fast", "general", "reasoning", "code"}]
+    force_tool_capable = _parse_optional_bool(
+        typer.prompt("Force tool_capable [true/false/skip]", default="skip")
+    )
+    force_tool_disabled = _parse_optional_bool(
+        typer.prompt("Force tool_disabled [true/false/skip]", default="skip")
+    )
+    reason = typer.prompt("Reason", default="").strip()
+
+    override: dict[str, Any] = {"model_pattern": model_pattern}
+    if provider != "*":
+        override["provider"] = provider
+    if force_include:
+        override["force_include"] = True
+    if force_exclude:
+        override["force_exclude"] = True
+    if force_modality:
+        override["force_modality"] = force_modality
+    if force_categories:
+        override["force_categories"] = force_categories
+    if force_tool_capable is not None:
+        override["force_tool_capable"] = force_tool_capable
+    if force_tool_disabled is not None:
+        override["force_tool_disabled"] = force_tool_disabled
+    if reason:
+        override["reason"] = reason
+
+    overrides = _nested_get(data, "inventory", "overrides", default=[])
+    if not isinstance(overrides, list):
+        overrides = []
+    overrides.append(override)
+    _nested_set(data, overrides, "inventory", "overrides")
+    _save_yaml(path, data)
+    console.print(f"Added inventory override for pattern: {model_pattern}")
+
+
+def _remove_inventory_override(config_path: str) -> None:
+    path = _config_path(config_path)
+    data = _load_yaml(path)
+    overrides = _nested_get(data, "inventory", "overrides", default=[])
+    rows = [item for item in overrides if isinstance(item, dict)]
+    if not rows:
+        console.print("No inventory overrides configured")
+        return
+    _show_inventory_overrides(config_path)
+    selected = _prompt_numbered_choice(len(rows), "Override number to remove")
+    removed = rows.pop(selected - 1)
+    _nested_set(data, rows, "inventory", "overrides")
+    _save_yaml(path, data)
+    console.print(f"Removed inventory override: {removed.get('model_pattern', '<unknown>')}")
+
+
+def _run_inventory_overrides_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Settings / Inventory Overrides",
+            config_path=config_path,
+            lines=[
+                "1) Show overrides",
+                "2) Add override",
+                "3) Remove override by number",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _show_inventory_overrides(config_path)
+                _pause()
+            elif choice == "2":
+                _add_inventory_override(config_path)
+                _pause()
+            elif choice == "3":
+                _remove_inventory_override(config_path)
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
 
 
 def _show_provider_summary(config_path: str, provider_name: str) -> None:
@@ -2540,19 +3199,22 @@ def _run_alias_settings_panel(config_path: str) -> None:
             title="SimpleOpenRoad / Settings / Alias Chains",
             config_path=config_path,
             lines=[
-                "1) Show aliases",
-                "2) Edit alias chain by number",
-                "3) Set alias strategy",
-                "4) Set alias selection mode",
+                "1) Show generated and custom aliases",
+                "2) Edit custom alias chain by number",
+                "3) Set custom alias strategy",
+                "4) Set custom alias selection mode",
+                "5) Create custom alias",
+                "6) Remove custom alias",
                 "0) Back",
             ],
         )
         choice = _prompt_menu_choice()
         try:
             if choice == "1":
-                alias_name = _select_alias_name(config_path)
-                if alias_name is not None:
-                    _show_alias_candidates(config_path, alias_name)
+                cfg = load_gateway_config(config_path=config_path)
+                snapshot = _current_inventory_snapshot(config_path=config_path, refresh=False)
+                _print_generated_aliases_table(snapshot)
+                _print_custom_aliases_table(cfg)
                 _pause()
             elif choice == "2":
                 alias_name = _select_alias_name(config_path)
@@ -2572,6 +3234,12 @@ def _run_alias_settings_panel(config_path: str) -> None:
                     _update_config_value(config_path, value, "routes", "aliases", alias_name, "selection")
                     console.print(f"Updated alias {alias_name}: selection={value}")
                     _pause()
+            elif choice == "5":
+                _create_custom_alias(config_path)
+                _pause()
+            elif choice == "6":
+                _remove_custom_alias(config_path)
+                _pause()
             elif choice == "0":
                 return
             else:
@@ -2600,7 +3268,8 @@ def _run_settings_panel(config_path: str) -> None:
                 "10) Model capability settings",
                 "11) Alias chain settings",
                 "12) Provider settings",
-                "13) Reload config in running app",
+                "13) Inventory refresh schedule",
+                "14) Reload config in running app",
                 "0) Back",
             ],
         )
@@ -2667,6 +3336,8 @@ def _run_settings_panel(config_path: str) -> None:
             elif choice == "12":
                 _run_provider_settings_panel(config_path=config_path)
             elif choice == "13":
+                _run_inventory_schedule_panel(config_path=config_path)
+            elif choice == "14":
                 config_reload(config_path=config_path)
                 _pause()
             elif choice == "0":
@@ -2747,8 +3418,10 @@ def _run_api_access_panel(config_path: str) -> None:
                 _regenerate_master_api_key(restart_service=restart_now)
                 _pause()
             elif choice == "3":
-                _test_api_request(config_path=config_path)
-                _pause()
+                selected_model = _select_test_alias(config_path)
+                if selected_model is not None:
+                    _test_api_request(config_path=config_path, model=selected_model)
+                    _pause()
             elif choice == "4":
                 _print_openai_client_examples(config_path=config_path)
                 _pause()
@@ -2785,8 +3458,10 @@ def _run_quick_setup_panel(config_path: str) -> None:
                 _run_setup_wizard(config_path=config_path)
                 _pause()
             elif choice == "3":
-                _test_api_request(config_path=config_path)
-                _pause()
+                selected_model = _select_test_alias(config_path)
+                if selected_model is not None:
+                    _test_api_request(config_path=config_path, model=selected_model)
+                    _pause()
             elif choice == "4":
                 _print_quick_status(config_path=config_path)
                 _pause()
@@ -2802,7 +3477,10 @@ def _run_quick_setup_panel(config_path: str) -> None:
 
 def _run_route_preview_panel(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
-    alias_options = [alias for alias in ("auto/fast", "auto/smart", "auto/code") if alias in cfg.routes.aliases]
+    snapshot = _current_inventory_snapshot(config_path, refresh=False)
+    preferred_aliases = ("auto/fast", "auto/general", "auto/reasoning", "auto/code", "auto/free")
+    available_aliases = set(_generated_alias_ids(snapshot) or list(cfg.routes.aliases))
+    alias_options = [alias for alias in preferred_aliases if alias in available_aliases]
     while True:
         lines = [f"{index}) Preview {alias}" for index, alias in enumerate(alias_options, start=1)]
         custom_option = len(alias_options) + 1
@@ -2821,7 +3499,7 @@ def _run_route_preview_panel(config_path: str) -> None:
                 _print_route_preview(config_path=config_path, model=alias_options[selected - 1])
                 _pause()
             elif selected == custom_option:
-                model = typer.prompt("Model or alias", default=_recommended_model_alias(cfg)).strip()
+                model = typer.prompt("Model or alias", default=_recommended_model_alias(cfg, snapshot)).strip()
                 _print_route_preview(config_path=config_path, model=model)
                 _pause()
             else:
@@ -2852,7 +3530,8 @@ def _run_routing_models_panel(config_path: str) -> None:
                 _run_route_preview_panel(config_path=config_path)
             elif choice == "2":
                 cfg = load_gateway_config(config_path=config_path)
-                _print_alias_help_table(cfg)
+                snapshot = _current_inventory_snapshot(config_path, refresh=False)
+                _print_alias_help_table(cfg, snapshot)
                 routes_list(config_path=config_path)
                 _pause()
             elif choice == "3":
@@ -2860,10 +3539,10 @@ def _run_routing_models_panel(config_path: str) -> None:
             elif choice == "4":
                 _run_capabilities_panel(config_path=config_path)
             elif choice == "5":
-                cfg = load_gateway_config(config_path=config_path)
-                model = typer.prompt("Model or alias", default=_recommended_model_alias(cfg)).strip()
-                _test_api_request(config_path=config_path, model=model)
-                _pause()
+                selected_model = _select_test_alias(config_path)
+                if selected_model is not None:
+                    _test_api_request(config_path=config_path, model=selected_model)
+                    _pause()
             elif choice == "0":
                 return
             else:
@@ -2895,8 +3574,10 @@ def _run_diagnostics_panel(config_path: str) -> None:
                 doctor(config_path=config_path)
                 _pause()
             elif choice == "2":
-                _test_api_request(config_path=config_path)
-                _pause()
+                selected_model = _select_test_alias(config_path)
+                if selected_model is not None:
+                    _test_api_request(config_path=config_path, model=selected_model)
+                    _pause()
             elif choice == "3":
                 _run_route_preview_panel(config_path=config_path)
             elif choice == "4":
@@ -3024,7 +3705,8 @@ def _run_service_panel(config_path: str) -> bool:
                 service_stop(mode="system")
                 _pause()
             elif choice == "5":
-                _run_update_panel(config_path=config_path)
+                if _run_update_panel(config_path=config_path):
+                    return True
             elif choice == "6":
                 service_install(config_path=config_path, mode="system", run_as=None, start=True)
                 _pause()
@@ -3046,7 +3728,7 @@ def _run_service_panel(config_path: str) -> bool:
             _pause()
 
 
-def _run_update_panel(config_path: str) -> None:
+def _run_update_panel(config_path: str) -> bool:
     while True:
         _print_menu(
             title="SimpleOpenRoad / Service and Updates / Update",
@@ -3063,15 +3745,18 @@ def _run_update_panel(config_path: str) -> None:
         try:
             if choice == "1":
                 _run_update(config_path=config_path, channel="stable", yes=False)
-                _pause()
+                console.print("Current panel is closing. Start a fresh panel with: sor")
+                return True
             elif choice == "2":
                 _run_update(config_path=config_path, channel="prerelease", yes=False)
-                _pause()
+                console.print("Current panel is closing. Start a fresh panel with: sor")
+                return True
             elif choice == "3":
                 install_root = _detect_wrapper_install_root() or _guess_install_root(config_path)
                 current_version = _read_installed_version(install_root)
                 if current_version == "unknown":
                     console.print("Current installed version is unknown. Use latest stable or prerelease instead.")
+                    _pause()
                 else:
                     _run_update(
                         config_path=config_path,
@@ -3079,12 +3764,14 @@ def _run_update_panel(config_path: str) -> None:
                         install_dir=str(install_root),
                         yes=False,
                     )
-                _pause()
+                    console.print("Current panel is closing. Start a fresh panel with: sor")
+                    return True
             elif choice == "4":
                 _run_update(config_path=config_path, ref="main", yes=False)
-                _pause()
+                console.print("Current panel is closing. Start a fresh panel with: sor")
+                return True
             elif choice == "0":
-                return
+                return False
             else:
                 console.print("Unknown option")
                 _pause()

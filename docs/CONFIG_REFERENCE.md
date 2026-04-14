@@ -44,6 +44,12 @@ routing:
     malformed_response: switch_provider
     unsupported_model: switch_provider
 
+inventory:
+  refresh_time: "05:00"
+  refresh_timezone: Europe/Moscow
+  refresh_interval_hours: 24
+  overrides: []
+
 providers:
   gemini:
     enabled: true
@@ -55,7 +61,7 @@ providers:
   github:
     enabled: true
     priority: 20
-    endpoint: https://models.inference.ai.azure.com
+    endpoint: https://models.github.ai
     timeout_seconds: 45
     keys: []
 
@@ -70,145 +76,7 @@ providers:
     keys: []
 
 routes:
-  aliases:
-    auto/smart:
-      strategy: strict_priority
-      selection: adaptive
-      candidates:
-        - provider: gemini
-          model: gemini-2.5-flash
-        - provider: gemini
-          model: gemini-3.1-flash-lite-preview
-        - provider: gemini
-          model: gemini-3-flash-preview
-        - provider: gemini
-          model: gemini-3.1-pro-preview
-        - provider: github
-          model: gpt-5.3-codex
-        - provider: github
-          model: gpt-5.4-mini
-        - provider: github
-          model: gpt-5.4
-        - provider: github
-          model: gpt-4.1-mini
-        - provider: openrouter
-          model: openai/gpt-5.4-nano
-        - provider: openrouter
-          model: openai/gpt-5.4-mini
-        - provider: openrouter
-          model: openai/gpt-5.4
-        - provider: openrouter
-          model: openai/gpt-5.4-pro
-        - provider: openrouter
-          model: openai/gpt-5.3-codex
-        - provider: openrouter
-          model: google/gemini-3.1-flash-lite-preview
-        - provider: openrouter
-          model: google/gemini-3-flash-preview
-        - provider: openrouter
-          model: google/gemini-3.1-pro-preview
-        - provider: openrouter
-          model: anthropic/claude-haiku-4.5
-        - provider: openrouter
-          model: anthropic/claude-sonnet-4.6
-        - provider: openrouter
-          model: anthropic/claude-opus-4.6
-        - provider: openrouter
-          model: qwen/qwen3-coder-plus
-        - provider: openrouter
-          model: qwen/qwen3-coder-next
-        - provider: openrouter
-          model: qwen/qwen3.6-plus
-        - provider: openrouter
-          model: moonshotai/kimi-k2.5
-        - provider: openrouter
-          model: x-ai/grok-code-fast-1
-        - provider: openrouter
-          model: x-ai/grok-4.20
-
-    auto/fast:
-      strategy: strict_priority
-      candidates:
-        - provider: gemini
-          model: gemini-2.5-flash
-        - provider: gemini
-          model: gemini-3.1-flash-lite-preview
-        - provider: github
-          model: gpt-4.1-mini
-        - provider: openrouter
-          model: openai/gpt-5.4-nano
-        - provider: openrouter
-          model: google/gemini-3.1-flash-lite-preview
-        - provider: openrouter
-          model: anthropic/claude-haiku-4.5
-
-    auto/balanced:
-      strategy: strict_priority
-      candidates:
-        - provider: gemini
-          model: gemini-3-flash-preview
-        - provider: github
-          model: gpt-5.4-mini
-        - provider: github
-          model: gpt-4.1
-        - provider: openrouter
-          model: openai/gpt-5.4-mini
-        - provider: openrouter
-          model: google/gemini-3-flash-preview
-        - provider: openrouter
-          model: anthropic/claude-sonnet-4.6
-        - provider: openrouter
-          model: qwen/qwen3.6-plus
-
-    auto/strong:
-      strategy: strict_priority
-      candidates:
-        - provider: gemini
-          model: gemini-3.1-pro-preview
-        - provider: github
-          model: gpt-5.4-pro
-        - provider: github
-          model: gpt-5.4
-        - provider: openrouter
-          model: openai/gpt-5.4-pro
-        - provider: openrouter
-          model: openai/gpt-5.4
-        - provider: openrouter
-          model: google/gemini-3.1-pro-preview
-        - provider: openrouter
-          model: anthropic/claude-opus-4.6
-        - provider: openrouter
-          model: anthropic/claude-sonnet-4.6
-        - provider: openrouter
-          model: x-ai/grok-4.20
-
-    auto/code:
-      strategy: strict_priority
-      candidates:
-        - provider: github
-          model: gpt-5.3-codex
-        - provider: github
-          model: gpt-5.4
-        - provider: openrouter
-          model: openai/gpt-5.3-codex
-        - provider: openrouter
-          model: anthropic/claude-sonnet-4.6
-        - provider: openrouter
-          model: anthropic/claude-opus-4.6
-        - provider: openrouter
-          model: openai/gpt-5.4
-        - provider: openrouter
-          model: google/gemini-3.1-pro-preview-customtools
-        - provider: openrouter
-          model: qwen/qwen3-coder-plus
-        - provider: openrouter
-          model: qwen/qwen3-coder-next
-        - provider: openrouter
-          model: moonshotai/kimi-k2.5
-        - provider: openrouter
-          model: x-ai/grok-code-fast-1
-        - provider: gemini
-          model: gemini-3.1-pro-preview
+  aliases: {}
 
 storage:
   sqlite_path: data/gateway.db
@@ -225,9 +93,7 @@ observability:
   save_attempt_events: true
 ```
 
-Route aliases try candidates in the listed order unless `selection: adaptive` is set. Providers without configured active keys are skipped before any provider request is made. If all candidates fail, the gateway returns an error.
-
-`auto/smart` uses `selection: adaptive`, which is a local heuristic and does not make an extra LLM request. It estimates request size, output budget, and code/reasoning hints, then reorders candidates for fast, balanced, strong, or code-heavy tasks.
+Generated aliases are built from the provider inventory at runtime and cached until the next configured inventory refresh window. By default, cached inventory becomes stale every day at `05:00` in `Europe/Moscow`; change `inventory.refresh_time`, `inventory.refresh_timezone`, or `inventory.refresh_interval_hours` if another schedule is needed. Keep `routes.aliases` for custom, non-generated aliases only. Providers without configured active keys are skipped before any provider request is made. If all candidates fail, the gateway returns an error.
 
 Requests that do not match an alias are treated as direct model requests. `provider/model` forces a provider; an exact model id such as `gpt-5.4-mini` is tried with the same model id across configured providers.
 

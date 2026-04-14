@@ -5,6 +5,9 @@ from __future__ import annotations
 from app.config.models import GatewayConfig, ProviderConfig
 from app.core.security import is_configured_secret
 from app.core.types import RouteCandidate
+from app.inventory.models import GeneratedAlias
+
+GENERATED_ALIAS_PREFIX = "auto/"
 
 
 def _provider_has_configured_keys(provider: ProviderConfig) -> bool:
@@ -18,7 +21,29 @@ def _candidate_provider_is_configured(config: GatewayConfig, candidate: RouteCan
     return bool(provider and _provider_has_configured_keys(provider))
 
 
-def resolve_candidates(config: GatewayConfig, requested_model: str) -> tuple[list[RouteCandidate], str | None]:
+def resolve_candidates(
+    config: GatewayConfig,
+    requested_model: str,
+    generated_aliases: list[GeneratedAlias] | None = None,
+) -> tuple[list[RouteCandidate], str | None]:
+    alias_map = {alias.alias_id: alias for alias in generated_aliases or []}
+    generated_alias = alias_map.get(requested_model)
+    if generated_alias is not None:
+        return (
+            [
+                RouteCandidate(provider=candidate.provider, model=candidate.model_id)
+                for candidate in generated_alias.candidates
+                if _candidate_provider_is_configured(
+                    config,
+                    RouteCandidate(provider=candidate.provider, model=candidate.model_id),
+                )
+            ],
+            requested_model,
+        )
+
+    if requested_model.startswith(GENERATED_ALIAS_PREFIX):
+        return [], requested_model
+
     if requested_model in config.routes.aliases:
         alias_cfg = config.routes.aliases[requested_model]
         return (

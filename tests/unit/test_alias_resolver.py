@@ -1,4 +1,4 @@
-from app.config.models import GatewayConfig
+﻿from app.config.models import GatewayConfig
 from app.router.alias_resolver import resolve_candidates
 
 
@@ -20,7 +20,7 @@ def test_alias_resolution_returns_ordered_candidates() -> None:
             },
             "routes": {
                 "aliases": {
-                    "auto/fast": {
+                    "custom/fast": {
                         "strategy": "strict_priority",
                         "candidates": [{"provider": "github", "model": "gpt-4.1-mini"}],
                     }
@@ -29,8 +29,8 @@ def test_alias_resolution_returns_ordered_candidates() -> None:
         }
     )
 
-    candidates, alias = resolve_candidates(cfg, "auto/fast")
-    assert alias == "auto/fast"
+    candidates, alias = resolve_candidates(cfg, "custom/fast")
+    assert alias == "custom/fast"
     assert len(candidates) == 1
     assert candidates[0].provider == "github"
     assert candidates[0].model == "gpt-4.1-mini"
@@ -76,7 +76,7 @@ def test_alias_resolution_skips_providers_without_configured_keys() -> None:
             },
             "routes": {
                 "aliases": {
-                    "auto/fast": {
+                    "custom/fast": {
                         "strategy": "strict_priority",
                         "candidates": [
                             {"provider": "gemini", "model": "gemini-2.5-flash"},
@@ -88,9 +88,9 @@ def test_alias_resolution_skips_providers_without_configured_keys() -> None:
         }
     )
 
-    candidates, alias = resolve_candidates(cfg, "auto/fast")
+    candidates, alias = resolve_candidates(cfg, "custom/fast")
 
-    assert alias == "auto/fast"
+    assert alias == "custom/fast"
     assert len(candidates) == 1
     assert candidates[0].provider == "github"
     assert candidates[0].model == "gpt-4.1-mini"

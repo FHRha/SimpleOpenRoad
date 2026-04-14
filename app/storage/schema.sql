@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS usage_stats (
   UNIQUE(bucket_minute, provider, key_id)
 );
 
+CREATE TABLE IF NOT EXISTS route_model_memory (
+  route_alias TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  context_bucket TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  avg_latency_ms REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(route_alias, profile, context_bucket)
+);
+
 CREATE INDEX IF NOT EXISTS idx_health_key_time ON health_checks(key_id, checked_at);
 CREATE INDEX IF NOT EXISTS idx_attempts_request ON request_attempts(request_id);
 CREATE INDEX IF NOT EXISTS idx_usage_bucket ON usage_stats(bucket_minute, provider, key_id);
+CREATE INDEX IF NOT EXISTS idx_route_memory_alias ON route_model_memory(route_alias, profile, context_bucket);

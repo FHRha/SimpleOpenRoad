@@ -121,7 +121,7 @@ Persist:
 ### 2.11 Model Alias Routing
 Support:
 - explicit provider model (e.g. `gemini/gemini-2.5-flash`)
-- auto aliases (e.g. `auto/smart`, `auto/fast`, `auto/balanced`, `auto/strong`, `auto/code`)
+- generated model aliases derived from provider inventory
 
 Server maps alias -> ordered provider/model candidates with fallback chain.
 Adaptive aliases can reorder candidates locally using request-size and task-shape heuristics without an extra model call.

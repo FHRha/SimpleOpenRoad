@@ -11,6 +11,7 @@ from app.config.runtime import RuntimeConfig
 from app.core.errors import ErrorClass, GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
 from app.health.checker import HealthChecker
+from app.inventory.discovery import InventoryDiscoveryService
 from app.providers.base import ProviderAdapter
 from app.registry.keys import KeyRegistry
 from app.router.engine import RoutingEngine
@@ -18,6 +19,7 @@ from app.storage.db import SQLiteDB
 from app.storage.repositories.attempts_repo import AttemptsRepository
 from app.storage.repositories.health_repo import HealthRepository
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
+from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
 
 
@@ -62,10 +64,10 @@ class DummyProviderAdapter(ProviderAdapter):
         return _iter()
 
     async def validate_key(self, key):  # type: ignore[override]
-        return {"status": "valid", "models": ["m1"], "error_code": None, "error_message": None}
+        return {"status": "valid", "models": ["gpt-4.1-mini"], "error_code": None, "error_message": None}
 
     async def list_models(self, key):  # type: ignore[override]
-        return ["m1"]
+        return ["gpt-4.1-mini"]
 
 
 class SlowValidateProviderAdapter(DummyProviderAdapter):
@@ -76,7 +78,7 @@ class SlowValidateProviderAdapter(DummyProviderAdapter):
 
 class RateLimitFirstModelAdapter(DummyProviderAdapter):
     async def chat_completions(self, request: UnifiedLLMRequest, key):  # type: ignore[override]
-        if request.model == "m1":
+        if request.model in {"gpt-4.1-mini", "m1"}:
             raise GatewayError(
                 message="rate limited",
                 error_class=ErrorClass.RATE_LIMIT,
@@ -89,7 +91,7 @@ class RateLimitFirstModelAdapter(DummyProviderAdapter):
 
 class EmptyChatFirstModelAdapter(DummyProviderAdapter):
     async def chat_completions(self, request: UnifiedLLMRequest, key):  # type: ignore[override]
-        if request.model == "m1":
+        if request.model in {"gpt-4.1-mini", "m1"}:
             return {
                 "id": "chatcmpl-empty",
                 "object": "chat.completion",
@@ -130,8 +132,18 @@ def _build_runtime_config(sqlite_path: str, save_attempt_events: bool = True) ->
                 "aliases": {
                     "auto/fast": {
                         "strategy": "least_errors",
-                        "candidates": [{"provider": "p1", "model": "m1"}],
-                    }
+                        "candidates": [
+                            {"provider": "p1", "model": "m1"},
+                            {"provider": "p1", "model": "m2"},
+                        ],
+                    },
+                    "custom/fast": {
+                        "strategy": "least_errors",
+                        "candidates": [
+                            {"provider": "p1", "model": "m1"},
+                            {"provider": "p1", "model": "m2"},
+                        ],
+                    },
                 }
             },
             "storage": {"sqlite_path": sqlite_path},
@@ -148,17 +160,22 @@ def _build_engine(tmp_path: Path, save_attempt_events: bool = True) -> tuple[Rou
     db.initialize(str(_schema_path()))
     keys_repo = KeysRuntimeRepository(db)
     attempts_repo = AttemptsRepository(db)
+    route_memory_repo = RouteModelMemoryRepository(db)
     stats_repo = StatsRepository(db)
     key_registry = KeyRegistry(keys_repo)
     key_registry.sync_defaults(runtime_config.get())
+    inventory_discovery = InventoryDiscoveryService(runtime_config=runtime_config, providers={})
 
     engine = RoutingEngine(
         runtime_config=runtime_config,
         key_registry=key_registry,
         attempts_repo=attempts_repo,
+        route_memory_repo=route_memory_repo,
         stats_repo=stats_repo,
+        inventory_discovery=inventory_discovery,
     )
     engine.providers = {"p1": DummyProviderAdapter()}
+    inventory_discovery.refresh_providers(engine.providers)
     return engine, key_registry, attempts_repo
 
 
@@ -185,6 +202,28 @@ async def test_save_attempt_events_flag_disables_attempt_persistence(tmp_path: P
 
     attempts = attempts_repo.list_for_request(context.request_id)
     assert attempts == []
+
+
+@pytest.mark.asyncio
+async def test_router_prefers_remembered_successful_model_for_same_profile_bucket(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    assert engine.route_memory_repo is not None
+    engine.route_memory_repo.record_success(
+        route_alias="custom/fast",
+        profile="fast",
+        context_bucket="small",
+        provider="p1",
+        model="m2",
+        latency_ms=12.0,
+        updated_at="2026-04-14T00:00:00+00:00",
+    )
+
+    request = UnifiedLLMRequest(model="custom/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="custom/fast", stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/m2"
+    assert decision.attempts[0].model == "m2"
 
 
 def test_key_is_blocked_after_max_consecutive_errors(tmp_path: Path) -> None:
@@ -292,7 +331,7 @@ async def test_router_switches_to_next_model_when_first_model_rate_limited(tmp_p
             },
             "routes": {
                 "aliases": {
-                    "auto/fast": {
+                    "custom/fast": {
                         "strategy": "strict_priority",
                         "candidates": [
                             {"provider": "p1", "model": "m1"},
@@ -310,20 +349,25 @@ async def test_router_switches_to_next_model_when_first_model_rate_limited(tmp_p
     db.initialize(str(_schema_path()))
     keys_repo = KeysRuntimeRepository(db)
     attempts_repo = AttemptsRepository(db)
+    route_memory_repo = RouteModelMemoryRepository(db)
     stats_repo = StatsRepository(db)
     key_registry = KeyRegistry(keys_repo)
     key_registry.sync_defaults(runtime_config.get())
+    inventory_discovery = InventoryDiscoveryService(runtime_config=runtime_config, providers={})
 
     engine = RoutingEngine(
         runtime_config=runtime_config,
         key_registry=key_registry,
         attempts_repo=attempts_repo,
+        route_memory_repo=route_memory_repo,
         stats_repo=stats_repo,
+        inventory_discovery=inventory_discovery,
     )
     engine.providers = {"p1": RateLimitFirstModelAdapter()}
+    inventory_discovery.refresh_providers(engine.providers)
 
-    request = UnifiedLLMRequest(model="auto/fast", messages=[ChatMessage(role="user", content="hello")])
-    context = engine.build_context(route_alias="auto/fast", stream=False)
+    request = UnifiedLLMRequest(model="custom/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="custom/fast", stream=False)
     payload, decision = await engine.route_chat_completion(request, context)
 
     assert payload["choices"][0]["message"]["content"] == "ok"
@@ -349,7 +393,7 @@ async def test_router_switches_to_next_model_when_first_model_returns_empty_chat
             },
             "routes": {
                 "aliases": {
-                    "auto/fast": {
+                    "custom/fast": {
                         "strategy": "strict_priority",
                         "candidates": [
                             {"provider": "p1", "model": "m1"},
@@ -367,20 +411,25 @@ async def test_router_switches_to_next_model_when_first_model_returns_empty_chat
     db.initialize(str(_schema_path()))
     keys_repo = KeysRuntimeRepository(db)
     attempts_repo = AttemptsRepository(db)
+    route_memory_repo = RouteModelMemoryRepository(db)
     stats_repo = StatsRepository(db)
     key_registry = KeyRegistry(keys_repo)
     key_registry.sync_defaults(runtime_config.get())
+    inventory_discovery = InventoryDiscoveryService(runtime_config=runtime_config, providers={})
 
     engine = RoutingEngine(
         runtime_config=runtime_config,
         key_registry=key_registry,
         attempts_repo=attempts_repo,
+        route_memory_repo=route_memory_repo,
         stats_repo=stats_repo,
+        inventory_discovery=inventory_discovery,
     )
     engine.providers = {"p1": EmptyChatFirstModelAdapter()}
+    inventory_discovery.refresh_providers(engine.providers)
 
-    request = UnifiedLLMRequest(model="auto/fast", messages=[ChatMessage(role="user", content="hello")])
-    context = engine.build_context(route_alias="auto/fast", stream=False)
+    request = UnifiedLLMRequest(model="custom/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="custom/fast", stream=False)
     payload, decision = await engine.route_chat_completion(request, context)
 
     assert payload["choices"][0]["message"]["content"] == "ok"

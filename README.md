@@ -57,10 +57,10 @@ For OpenAI-compatible plugins and clients, use:
 ```text
 Base URL: http://<SERVER_IP>:12345/v1
 API Key: <MASTER_API_KEY>
-Model: auto/smart
+Model: auto/general
 ```
 
-Use `auto/smart` as the default model name in plugins. It uses a local low-cost heuristic to pick a fast, balanced, strong, or code-oriented candidate based on request size, output budget, and code/reasoning hints. Use `auto/fast` when you explicitly want lightweight models only. Other default aliases are `auto/balanced`, `auto/strong`, and `auto/code`.
+Use `auto/general` as the default model name in plugins. Built-in aliases are generated from the models currently available on your configured providers. Use `auto/fast` when you explicitly want lightweight models only, `auto/reasoning` for harder reasoning, `auto/code` for coding tasks, and `auto/free` when a free-capable route is available.
 
 The OpenAI-compatible gateway accepts both simple requests and agent-style payloads. Plain `curl` chat calls with string `messages[].content` work, and so do richer OpenAI-style payloads with structured content parts, `tools`, `tool_choice`, `stream_options`, `reasoning_effort`, and `/v1/responses` requests with `instructions`.
 

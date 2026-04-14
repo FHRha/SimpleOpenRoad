@@ -7,6 +7,7 @@ import pytest
 import respx
 
 from app.config.models import KeyConfig, ProviderConfig
+from app.core.errors import ErrorClass, GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
 from app.providers.openai_compatible import OpenAICompatibleAdapter
 
@@ -76,3 +77,43 @@ async def test_openai_compatible_lists_models_with_get() -> None:
     models = await _adapter_with_v1_endpoint().list_models(KeyConfig(id="openrouter-main", key="secret"))
 
     assert models == ["openai/gpt-4o-mini"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_classifies_quota_403_as_rate_limit() -> None:
+    respx.post("https://openrouter.example/api/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            403,
+            json={
+                "error": {
+                    "message": "Key limit exceeded (total limit). Manage it using settings.",
+                    "code": 403,
+                }
+            },
+        )
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await _adapter_with_v1_endpoint().chat_completions(
+            UnifiedLLMRequest(model="m1", messages=[ChatMessage(role="user", content="hello")]),
+            KeyConfig(id="openrouter-main", key="secret"),
+        )
+
+    assert exc_info.value.error_class == ErrorClass.RATE_LIMIT
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_keeps_permission_403_as_auth_forbidden() -> None:
+    respx.post("https://openrouter.example/api/v1/chat/completions").mock(
+        return_value=httpx.Response(403, json={"error": {"message": "Forbidden", "code": 403}})
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await _adapter_with_v1_endpoint().chat_completions(
+            UnifiedLLMRequest(model="m1", messages=[ChatMessage(role="user", content="hello")]),
+            KeyConfig(id="openrouter-main", key="secret"),
+        )
+
+    assert exc_info.value.error_class == ErrorClass.AUTH_FORBIDDEN

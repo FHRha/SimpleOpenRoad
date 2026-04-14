@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from app.core.types import RequestContext, UnifiedLLMRequest
+from app.core.types import RequestContext, RouterDecision, UnifiedLLMRequest
 from app.observability.logging import get_logger
 from app.router.engine import RoutingEngine
 
@@ -17,7 +17,7 @@ class GatewayService:
     def _should_log_decisions(self) -> bool:
         return self.routing_engine.runtime_config.get().observability.router_decision_log
 
-    async def chat_completions(self, request: UnifiedLLMRequest) -> tuple[dict, str]:
+    async def chat_completions(self, request: UnifiedLLMRequest) -> tuple[dict, str, RouterDecision]:
         context = self.routing_engine.build_context(route_alias=request.model if request.model.startswith("auto/") else None, stream=False)
         payload, decision = await self.routing_engine.route_chat_completion(request, context)
         if self._should_log_decisions():
@@ -30,9 +30,9 @@ class GatewayService:
                     "route_alias": decision.resolved_alias,
                 },
             )
-        return payload, context.request_id
+        return payload, context.request_id, decision
 
-    async def responses(self, request: UnifiedLLMRequest) -> tuple[dict, str]:
+    async def responses(self, request: UnifiedLLMRequest) -> tuple[dict, str, RouterDecision]:
         context = self.routing_engine.build_context(route_alias=request.model if request.model.startswith("auto/") else None, stream=False)
         payload, decision = await self.routing_engine.route_responses(request, context)
         if self._should_log_decisions():
@@ -45,7 +45,7 @@ class GatewayService:
                     "route_alias": decision.resolved_alias,
                 },
             )
-        return payload, context.request_id
+        return payload, context.request_id, decision
 
     async def stream_chat_completions(self, request: UnifiedLLMRequest) -> tuple[AsyncIterator[bytes], RequestContext]:
         context = self.routing_engine.build_context(route_alias=request.model if request.model.startswith("auto/") else None, stream=True)
