@@ -8,6 +8,7 @@ from app.core.types import RouteCandidate
 from app.inventory.models import GeneratedAlias
 
 GENERATED_ALIAS_PREFIX = "auto/"
+GENERATED_PROVIDER_TEXT_PREFIX = "text/"
 
 
 def _provider_has_configured_keys(provider: ProviderConfig) -> bool:
@@ -19,6 +20,15 @@ def _provider_has_configured_keys(provider: ProviderConfig) -> bool:
 def _candidate_provider_is_configured(config: GatewayConfig, candidate: RouteCandidate) -> bool:
     provider = config.providers.get(candidate.provider)
     return bool(provider and _provider_has_configured_keys(provider))
+
+
+def looks_like_generated_alias(config: GatewayConfig, requested_model: str) -> bool:
+    if requested_model.startswith(GENERATED_ALIAS_PREFIX):
+        return True
+    if "/" not in requested_model:
+        return False
+    provider_name, model_name = requested_model.split("/", 1)
+    return provider_name in config.providers and model_name.startswith(GENERATED_PROVIDER_TEXT_PREFIX)
 
 
 def resolve_candidates(
@@ -41,7 +51,7 @@ def resolve_candidates(
             requested_model,
         )
 
-    if requested_model.startswith(GENERATED_ALIAS_PREFIX):
+    if looks_like_generated_alias(config, requested_model):
         return [], requested_model
 
     if requested_model in config.routes.aliases:

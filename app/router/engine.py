@@ -21,6 +21,7 @@ from app.registry.keys import KeyRegistry
 from app.router.backoff import sleep_with_backoff
 from app.router.classifier import classify_error
 from app.router.context_limits import filter_candidates_by_context, limits_from_snapshot
+from app.router.alias_resolver import looks_like_generated_alias
 from app.router.model_planner import plan_candidates
 from app.router.policy import policy_action, should_retry_same_key, should_switch_provider
 from app.router.request_analyzer import analyze_request_route
@@ -82,6 +83,22 @@ class RoutingEngine:
         return detail
 
     @staticmethod
+    def _text_generated_aliases(snapshot) -> list[GeneratedAlias]:
+        return [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+
+    @staticmethod
+    def _snapshot_has_alias(snapshot, alias_id: str) -> bool:
+        return any(alias.alias_id == alias_id for alias in RoutingEngine._text_generated_aliases(snapshot))
+
+    async def _snapshot_for_request(self, config, request: UnifiedLLMRequest):
+        snapshot = self.inventory_discovery.current_snapshot()
+        if snapshot is None:
+            return await self.inventory_discovery.refresh()
+        if looks_like_generated_alias(config, request.model) and not self._snapshot_has_alias(snapshot, request.model):
+            return await self.inventory_discovery.refresh()
+        return snapshot
+
+    @staticmethod
     def _diagnostic_candidates(
         config,
         request: UnifiedLLMRequest,
@@ -104,6 +121,8 @@ class RoutingEngine:
             provider_name, model_name = request.model.split("/", 1)
             if provider_name in config.providers:
                 return [RouteCandidate(provider=provider_name, model=model_name)]
+        if looks_like_generated_alias(config, request.model):
+            return []
         return [
             RouteCandidate(provider=provider_name, model=request.model)
             for provider_name, provider in sorted(config.providers.items(), key=lambda item: item[1].priority)
@@ -280,10 +299,8 @@ class RoutingEngine:
         context: RequestContext,
     ) -> tuple[dict, RouterDecision]:
         config = self.runtime_config.get()
-        snapshot = self.inventory_discovery.current_snapshot()
-        if snapshot is None:
-            snapshot = await self.inventory_discovery.refresh()
-        generated_aliases = [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+        snapshot = await self._snapshot_for_request(config, request)
+        generated_aliases = self._text_generated_aliases(snapshot)
         analysis = analyze_request_route(request)
         candidates, resolved_alias = plan_candidates(config, request, generated_aliases=generated_aliases)
         candidates, context_skipped_details = filter_candidates_by_context(
@@ -495,6 +512,16 @@ class RoutingEngine:
         if cooldown_error is not None:
             raise cooldown_error
 
+        if not candidate_details and looks_like_generated_alias(config, request.model):
+            candidate_details.append(
+                {
+                    "provider": "alias",
+                    "model": request.model,
+                    "status": "skipped",
+                    "reason": "generated_alias_not_available",
+                }
+            )
+
         if not candidate_details:
             for candidate in self._diagnostic_candidates(config, request, candidates, generated_aliases):
                 provider = config.providers.get(candidate.provider)
@@ -522,10 +549,8 @@ class RoutingEngine:
         context: RequestContext,
     ) -> tuple[AsyncIterator[bytes], RouterDecision]:
         config = self.runtime_config.get()
-        snapshot = self.inventory_discovery.current_snapshot()
-        if snapshot is None:
-            snapshot = await self.inventory_discovery.refresh()
-        generated_aliases = [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+        snapshot = await self._snapshot_for_request(config, request)
+        generated_aliases = self._text_generated_aliases(snapshot)
         analysis = analyze_request_route(request)
         candidates, resolved_alias = plan_candidates(config, request, generated_aliases=generated_aliases)
         candidates, context_skipped_details = filter_candidates_by_context(
@@ -787,6 +812,16 @@ class RoutingEngine:
         cooldown_error = self._cooldown_error(config, candidates, runtime_states)
         if cooldown_error is not None:
             raise cooldown_error
+        if not candidate_details and looks_like_generated_alias(config, request.model):
+            candidate_details.append(
+                {
+                    "provider": "alias",
+                    "model": request.model,
+                    "status": "skipped",
+                    "reason": "generated_alias_not_available",
+                }
+            )
+
         if not candidate_details:
             for candidate in self._diagnostic_candidates(config, request, candidates, generated_aliases):
                 provider = config.providers.get(candidate.provider)

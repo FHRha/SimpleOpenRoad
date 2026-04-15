@@ -348,3 +348,29 @@ def test_generated_free_alias_never_upgrades_to_paid_reasoning_for_complex_reque
 
     assert alias == "auto/free"
     assert [candidate.model for candidate in candidates] == ["openrouter/free"]
+
+
+def test_missing_generated_alias_is_not_treated_as_direct_provider_model() -> None:
+    cfg = _adaptive_config()
+    request = UnifiedLLMRequest(
+        model="auto/fast",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    candidates, alias = plan_candidates(cfg, request, generated_aliases=[])
+
+    assert alias == "auto/fast"
+    assert candidates == []
+
+
+def test_missing_provider_scoped_generated_alias_is_not_treated_as_direct_model() -> None:
+    cfg = _adaptive_config()
+    request = UnifiedLLMRequest(
+        model="openrouter/text/fast",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    candidates, alias = plan_candidates(cfg, request, generated_aliases=[])
+
+    assert alias == "openrouter/text/fast"
+    assert candidates == []

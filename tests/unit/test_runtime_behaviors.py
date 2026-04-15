@@ -12,6 +12,7 @@ from app.core.errors import ErrorClass, GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
 from app.health.checker import HealthChecker
 from app.inventory.discovery import InventoryDiscoveryService
+from app.inventory.models import InventorySnapshot
 from app.providers.base import ProviderAdapter
 from app.registry.keys import KeyRegistry
 from app.router.engine import RoutingEngine
@@ -522,3 +523,106 @@ async def test_router_switches_to_next_model_when_first_model_returns_empty_chat
     assert payload["model"] == "p1/m2"
     assert [attempt.model for attempt in decision.attempts] == ["m1", "m2"]
     assert decision.attempts[0].error_class == ErrorClass.MALFORMED_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_router_refreshes_stale_empty_inventory_for_generated_alias(tmp_path: Path) -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "providers": {
+                "p1": {
+                    "enabled": True,
+                    "priority": 10,
+                    "endpoint": "https://example.invalid",
+                    "keys": [{"id": "p1-main", "key": "secret-main"}],
+                }
+            },
+            "storage": {"sqlite_path": str(tmp_path / "gateway.db")},
+            "health": {"check_timeout_seconds": 0},
+        }
+    )
+    runtime_config = RuntimeConfig(config=config, env=EnvSettings())
+    db = SQLiteDB(runtime_config.get().storage.sqlite_path)
+    db.initialize(str(_schema_path()))
+    keys_repo = KeysRuntimeRepository(db)
+    attempts_repo = AttemptsRepository(db)
+    route_memory_repo = RouteModelMemoryRepository(db)
+    stats_repo = StatsRepository(db)
+    key_registry = KeyRegistry(keys_repo)
+    key_registry.sync_defaults(runtime_config.get())
+    inventory_discovery = InventoryDiscoveryService(runtime_config=runtime_config, providers={})
+
+    engine = RoutingEngine(
+        runtime_config=runtime_config,
+        key_registry=key_registry,
+        attempts_repo=attempts_repo,
+        route_memory_repo=route_memory_repo,
+        stats_repo=stats_repo,
+        inventory_discovery=inventory_discovery,
+    )
+    engine.providers = {"p1": DummyProviderAdapter()}
+    inventory_discovery.refresh_providers(engine.providers)
+    inventory_discovery.cache.set(InventorySnapshot(refreshed_at="2026-04-15T00:00:00+00:00"))
+
+    request = UnifiedLLMRequest(model="auto/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="auto/fast", stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/gpt-4.1-mini"
+    assert decision.resolved_alias == "auto/fast"
+    assert [attempt.model for attempt in decision.attempts] == ["gpt-4.1-mini"]
+
+
+@pytest.mark.asyncio
+async def test_router_reports_missing_generated_alias_without_provider_model_fallback(tmp_path: Path) -> None:
+    config = GatewayConfig.model_validate(
+        {
+            "providers": {
+                "p1": {
+                    "enabled": True,
+                    "priority": 10,
+                    "endpoint": "https://example.invalid",
+                    "keys": [{"id": "p1-main", "key": "secret-main"}],
+                }
+            },
+            "storage": {"sqlite_path": str(tmp_path / "gateway.db")},
+            "health": {"check_timeout_seconds": 0},
+        }
+    )
+    runtime_config = RuntimeConfig(config=config, env=EnvSettings())
+    db = SQLiteDB(runtime_config.get().storage.sqlite_path)
+    db.initialize(str(_schema_path()))
+    keys_repo = KeysRuntimeRepository(db)
+    attempts_repo = AttemptsRepository(db)
+    route_memory_repo = RouteModelMemoryRepository(db)
+    stats_repo = StatsRepository(db)
+    key_registry = KeyRegistry(keys_repo)
+    key_registry.sync_defaults(runtime_config.get())
+    inventory_discovery = InventoryDiscoveryService(runtime_config=runtime_config, providers={})
+
+    engine = RoutingEngine(
+        runtime_config=runtime_config,
+        key_registry=key_registry,
+        attempts_repo=attempts_repo,
+        route_memory_repo=route_memory_repo,
+        stats_repo=stats_repo,
+        inventory_discovery=inventory_discovery,
+    )
+    engine.providers = {"p1": DummyProviderAdapter()}
+    inventory_discovery.refresh_providers(engine.providers)
+
+    request = UnifiedLLMRequest(model="auto/unknown", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="auto/unknown", stream=False)
+
+    with pytest.raises(GatewayError) as exc_info:
+        await engine.route_chat_completion(request, context)
+
+    candidates = exc_info.value.details["candidates"] if exc_info.value.details else []
+    assert candidates == [
+        {
+            "provider": "alias",
+            "model": "auto/unknown",
+            "status": "skipped",
+            "reason": "generated_alias_not_available",
+        }
+    ]
