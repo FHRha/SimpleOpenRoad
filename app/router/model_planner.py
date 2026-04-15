@@ -2,56 +2,22 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
-
 from app.config.models import GatewayConfig
-from app.core.types import RouteCandidate, UnifiedLLMRequest, stringify_content
+from app.core.types import RouteCandidate, UnifiedLLMRequest
 from app.inventory.models import GeneratedAlias
 from app.router.alias_resolver import resolve_candidates
 from app.router.model_capabilities import candidate_supports_tools
+from app.router.request_analyzer import (
+    RequestIntent,
+    RequestRouteAnalysis,
+    TaskProfile,
+    analyze_request_route,
+    estimate_request_tokens as _estimate_request_tokens,
+    request_uses_tools,
+)
 
-TaskProfile = Literal["fast", "balanced", "strong", "code"]
 GENERATED_TEXT_ALIAS_PREFIX = "auto/text/"
 COMPAT_TEXT_ALIASES = {"auto/free", "auto/fast", "auto/general", "auto/reasoning", "auto/code"}
-
-CODE_HINTS = {
-    "```",
-    "traceback",
-    "stack trace",
-    "exception",
-    "pytest",
-    "typescript",
-    "javascript",
-    "python",
-    "golang",
-    "rust",
-    "react",
-    "fastapi",
-    "sql",
-    "dockerfile",
-    "refactor",
-    "debug",
-    "function",
-    "class ",
-    "import ",
-}
-
-STRONG_HINTS = {
-    "architecture",
-    "design",
-    "analyze",
-    "analysis",
-    "research",
-    "compare",
-    "evaluate",
-    "optimize",
-    "проект",
-    "архитект",
-    "проанализ",
-    "сравни",
-    "исслед",
-    "оптимиз",
-}
 
 PROFILE_SCORE: dict[TaskProfile, dict[TaskProfile, int]] = {
     "fast": {"fast": 100, "balanced": 70, "code": 45, "strong": 30},
@@ -61,53 +27,16 @@ PROFILE_SCORE: dict[TaskProfile, dict[TaskProfile, int]] = {
 }
 
 
-def _stringify_input(value: Any) -> str:
-    return stringify_content(value)
-
-
 def _request_uses_tools(request: UnifiedLLMRequest) -> bool:
-    if request.extra_body.get("tools"):
-        return True
-    return any(message.role in {"tool", "function"} or bool(message.tool_calls) for message in request.messages)
+    return request_uses_tools(request)
 
 
 def estimate_request_tokens(request: UnifiedLLMRequest) -> int:
-    text_parts = [stringify_content(message.content) for message in request.messages]
-    text_parts.append(_stringify_input(request.input))
-    text_parts.append(_stringify_input(request.extra_body.get("instructions")))
-    text_parts.extend(str(value) for value in request.metadata.values())
-    char_count = sum(len(part) for part in text_parts)
-    output_budget = request.max_tokens or 0
-    return max(1, char_count // 4) + output_budget
+    return _estimate_request_tokens(request)
 
 
 def classify_request_profile(request: UnifiedLLMRequest) -> TaskProfile:
-    explicit = request.metadata.get("sor_profile") or request.metadata.get("task_profile")
-    if isinstance(explicit, str) and explicit in {"fast", "balanced", "strong", "code"}:
-        return explicit  # type: ignore[return-value]
-
-    if _request_uses_tools(request):
-        return "code"
-
-    text = "\n".join(
-        [
-            stringify_content(message.content) for message in request.messages
-        ]
-        + [_stringify_input(request.input), _stringify_input(request.extra_body.get("instructions"))]
-    ).lower()
-    token_estimate = estimate_request_tokens(request)
-    code_hits = sum(1 for hint in CODE_HINTS if hint in text)
-    strong_hits = sum(1 for hint in STRONG_HINTS if hint in text)
-
-    if code_hits >= 2:
-        return "code"
-    if token_estimate >= 128000 or (request.max_tokens or 0) >= 8000 or strong_hits >= 3:
-        return "strong"
-    if token_estimate >= 32000 or (request.max_tokens or 0) >= 2500 or strong_hits >= 1:
-        return "balanced"
-    if code_hits:
-        return "code"
-    return "fast"
+    return analyze_request_route(request).profile
 
 
 def classify_candidate_profile(candidate: RouteCandidate) -> TaskProfile:
@@ -154,10 +83,11 @@ def plan_candidates(
     if not alias:
         return candidates, alias
 
+    analysis = analyze_request_route(request)
     generated_alias = _generated_alias_by_id(generated_aliases or [], alias)
     if generated_alias is not None and _is_adaptive_generated_alias(generated_alias):
-        profile = classify_request_profile(request)
-        candidates = _adaptive_generated_candidates(generated_aliases or [], generated_alias, profile) or candidates
+        candidates = _adaptive_generated_candidates(generated_aliases or [], generated_alias, analysis) or candidates
+        profile = analysis.profile
         if profile == "code" and _request_uses_tools(request):
             tool_capable = [candidate for candidate in candidates if candidate_supports_tools(config, candidate)]
             if tool_capable:
@@ -170,7 +100,7 @@ def plan_candidates(
     if alias_config is None or alias_config.selection != "adaptive":
         return candidates, alias
 
-    profile = classify_request_profile(request)
+    profile = analysis.profile
     if profile == "code" and _request_uses_tools(request):
         tool_capable = [candidate for candidate in candidates if candidate_supports_tools(config, candidate)]
         if tool_capable:
@@ -194,11 +124,11 @@ def _is_adaptive_generated_alias(alias: GeneratedAlias) -> bool:
 def _adaptive_generated_candidates(
     generated_aliases: list[GeneratedAlias],
     requested_alias: GeneratedAlias,
-    profile: TaskProfile,
+    analysis: RequestRouteAnalysis,
 ) -> list[RouteCandidate]:
     alias_map = {alias.alias_id: alias for alias in generated_aliases}
-    category = _category_for_profile(profile)
-    categories = _category_fallbacks(requested_alias.category, category)
+    category = _category_for_profile(analysis.profile)
+    categories = _category_fallbacks(requested_alias.category, category, analysis.intent)
     resolved: list[RouteCandidate] = []
     for candidate_alias in _matching_generated_aliases(alias_map, requested_alias, categories):
         for candidate in candidate_alias.candidates:
@@ -214,9 +144,22 @@ def _category_for_profile(profile: TaskProfile) -> str:
     return profile
 
 
-def _category_fallbacks(requested_category: str, preferred_category: str) -> list[str]:
+def _category_fallbacks(
+    requested_category: str,
+    preferred_category: str,
+    intent: RequestIntent,
+) -> list[str]:
     if requested_category == "free":
         return ["free"]
+    if requested_category == "reasoning":
+        if intent == "trivial":
+            return ["fast", "general", "reasoning"]
+        if intent in {"planning", "analysis", "critical"}:
+            return ["reasoning", "general"]
+        if preferred_category == "fast":
+            return ["general", "reasoning"]
+    if requested_category == "general" and intent in {"planning", "analysis", "critical"}:
+        return _dedupe_strings([preferred_category, "reasoning", "general"])
     if preferred_category == "code":
         ordered = ["code", "reasoning", "general", requested_category]
     elif preferred_category == "reasoning":

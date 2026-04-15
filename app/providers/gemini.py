@@ -331,6 +331,10 @@ class GeminiAdapter(ProviderAdapter):
             }
 
     async def list_models(self, key: KeyConfig) -> list[str]:
+        records = await self.list_model_records(key)
+        return [str(item["id"]) for item in records if item.get("id")]
+
+    async def list_model_records(self, key: KeyConfig) -> list[dict[str, Any]]:
         timeout = httpx.Timeout(timeout=self.config.timeout_seconds)
         url = f"{self.config.endpoint.rstrip('/')}/v1beta/models?key={key.key}"
         try:
@@ -372,9 +376,11 @@ class GeminiAdapter(ProviderAdapter):
             )
 
         payload = response.json()
-        models: list[str] = []
+        models: list[dict[str, Any]] = []
         for item in payload.get("models", []):
             name = item.get("name") if isinstance(item, dict) else None
             if name:
-                models.append(str(name).split("/")[-1])
+                record = dict(item)
+                record["id"] = str(name).split("/")[-1]
+                models.append(record)
         return models

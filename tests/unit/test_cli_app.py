@@ -14,6 +14,7 @@ from app.config.loader import load_gateway_config
 from app.cli.app import cli_app
 from app.cli.app import _default_install_root
 from app.cli.app import _ensure_env_master_admin_keys
+from app.cli.app import _interactive_add_provider_key
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
 from app.cli.app import _select_test_alias
@@ -575,6 +576,8 @@ def test_test_api_request_shows_selected_and_failed_candidates(monkeypatch, tmp_
     _test_api_request(str(config_path))
 
     output = capsys.readouterr().out
+    assert "Intent" in output
+    assert "Profile" in output
     assert "Answered model" in output
     assert "openrouter/gpt-5.4-mini" in output
     assert "Failed candidates" in output
@@ -594,6 +597,21 @@ def test_test_api_request_shows_failed_candidates_from_error_diagnostics(
                     "message": "No healthy route candidates available",
                     "type": "provider_unavailable",
                     "details": {
+                        "analysis": {
+                            "intent": "trivial",
+                            "profile": "fast",
+                            "complexity_score": 0,
+                            "context_bucket": "small",
+                            "token_estimate": 1,
+                            "requires_tools": False,
+                            "reasons": ["trivial:hello"],
+                        },
+                        "route_memory": {
+                            "status": "miss",
+                            "route_alias": "auto/fast",
+                            "profile": "fast",
+                            "context_bucket": "small",
+                        },
                         "candidates": [
                             {
                                 "provider": "github",
@@ -623,6 +641,10 @@ def test_test_api_request_shows_failed_candidates_from_error_diagnostics(
     _test_api_request(str(config_path))
 
     output = capsys.readouterr().out
+    assert "Request Route Analysis" in output
+    assert "Route Memory" in output
+    assert "miss" in output
+    assert "trivial:hello" in output
     assert "Failed candidates" in output
     assert "github/gpt-4.1-mini, openrouter/gpt-5.4-mini" in output
 
@@ -835,6 +857,10 @@ def test_cli_routes_preview_shows_planned_candidates(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "Route Preview" in result.stdout
+    assert "Request Route Analysis" in result.stdout
+    assert "Effective Candidate Order" in result.stdout
+    assert "Selected source" in result.stdout
+    assert "Candidate preview" in result.stdout
     assert "Candidates" in result.stdout
     assert "github" in result.stdout
 
@@ -856,6 +882,35 @@ def test_cli_routes_preview_includes_runtime_key_details(tmp_path: Path) -> None
     assert "2099-01-01T00:00:00+00:00" in result.stdout
 
 
+def test_cli_routes_preview_includes_route_memory(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    cfg = load_gateway_config(str(config_path))
+    db = SQLiteDB(cfg.storage.sqlite_path)
+    schema_path = Path(__file__).resolve().parents[2] / "app" / "storage" / "schema.sql"
+    db.initialize(str(schema_path))
+    with db.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO route_model_memory(
+              route_alias, profile, context_bucket, provider, model,
+              success_count, avg_latency_ms, updated_at
+            ) VALUES ('custom/fast', 'fast', 'small', 'openrouter', 'gpt-4o-mini', 3, 42.5, '2026-04-15T00:00:00+00:00')
+            """
+        )
+
+    result = runner.invoke(
+        cli_app,
+        ["routes", "preview", "--model", "custom/fast", "--config-path", str(config_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Route memory" in result.stdout
+    assert "remembered" in result.stdout
+    assert "hit" in result.stdout
+    assert "openrouter/gpt-4o-mini" in result.stdout
+
+
 def test_cli_api_test_prints_candidate_diagnostics(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
@@ -868,6 +923,15 @@ def test_cli_api_test_prints_candidate_diagnostics(monkeypatch, tmp_path: Path) 
                     "message": "No healthy route candidates available",
                     "type": "provider_unavailable",
                     "details": {
+                        "analysis": {
+                            "intent": "trivial",
+                            "profile": "fast",
+                            "complexity_score": 0,
+                            "context_bucket": "small",
+                            "token_estimate": 1,
+                            "requires_tools": False,
+                            "reasons": ["trivial:hello"],
+                        },
                         "candidates": [
                             {
                                 "provider": "github",
@@ -888,6 +952,7 @@ def test_cli_api_test_prints_candidate_diagnostics(monkeypatch, tmp_path: Path) 
     result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="3\n3\n\n0\n0\n")
 
     assert result.exit_code == 0
+    assert "Request Route Analysis" in result.stdout
     assert "Route Candidate Diagnostics" in result.stdout
     assert "no_active_configured_keys" in result.stdout
 
@@ -1459,6 +1524,34 @@ def test_cli_keys_add_and_remove(tmp_path: Path) -> None:
     assert "github-backup" not in ids_after
 
 
+def test_cli_keys_add_rejects_duplicate_id_across_providers(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "keys",
+            "add",
+            "--provider",
+            "openrouter",
+            "--key-id",
+            "github-main",
+            "--secret",
+            "new-secret",
+            "--no-validate",
+            "--config-path",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "globally unique" in result.stderr
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    openrouter_ids = [item["id"] for item in data["providers"]["openrouter"]["keys"]]
+    assert openrouter_ids == ["openrouter-main"]
+
+
 def test_api_base_url_prefers_public_domain(monkeypatch, tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     cfg = load_gateway_config(str(config_path))
@@ -1694,3 +1787,18 @@ def test_keys_wizard_command_dispatch(monkeypatch, tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert called["config_path"] == str(config_path)
+
+
+def test_interactive_add_provider_key_reprompts_duplicate_id(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    prompts = iter(["2", "github-main", "openrouter-extra", "secret-value", "100"])
+
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr("app.cli.app.typer.confirm", lambda *args, **kwargs: False)
+
+    _interactive_add_provider_key(str(config_path))
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    openrouter_ids = [item["id"] for item in data["providers"]["openrouter"]["keys"]]
+    assert "openrouter-extra" in openrouter_ids
+    assert "github-main" not in openrouter_ids

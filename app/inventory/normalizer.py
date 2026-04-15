@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.inventory.models import DiscoveredModel, Modality
 from app.inventory.special_routes import is_special_route
 
@@ -26,10 +28,17 @@ def supports_tools(model_id: str) -> bool:
     return any(marker in normalized for marker in ("codex", "coder", "customtools", "grok-code"))
 
 
-def normalize_discovered_model(provider: str, model_id: str, key_id: str) -> DiscoveredModel:
+def normalize_discovered_model(
+    provider: str,
+    model_id: str,
+    key_id: str,
+    raw_metadata: dict[str, Any] | None = None,
+) -> DiscoveredModel:
     modality = guess_modality(model_id)
     normalized = model_id.lower()
     special = is_special_route(provider, model_id)
+    metadata = raw_metadata or {}
+    limits = _extract_token_limits(metadata)
     return DiscoveredModel(
         provider=provider,
         model_id=model_id,
@@ -44,4 +53,93 @@ def normalize_discovered_model(provider: str, model_id: str, key_id: str) -> Dis
         is_preview="preview" in normalized,
         is_special=special,
         is_text_candidate=modality == "text" and not special,
+        max_input_tokens=limits["max_input_tokens"],
+        max_output_tokens=limits["max_output_tokens"],
+        max_context_tokens=limits["max_context_tokens"],
+        raw_metadata=metadata,
     )
+
+
+def _extract_token_limits(metadata: dict[str, Any]) -> dict[str, int | None]:
+    direct_context = _first_int(
+        metadata,
+        "max_context_tokens",
+        "context_length",
+        "context_window",
+        "context",
+        "max_tokens",
+    )
+    direct_input = _first_int(
+        metadata,
+        "max_input_tokens",
+        "input_token_limit",
+        "inputTokenLimit",
+        "maxInputTokens",
+    )
+    direct_output = _first_int(
+        metadata,
+        "max_output_tokens",
+        "output_token_limit",
+        "outputTokenLimit",
+        "maxOutputTokens",
+    )
+
+    limits = metadata.get("limits")
+    if isinstance(limits, dict):
+        direct_context = direct_context or _first_int(
+            limits,
+            "max_context_tokens",
+            "context_length",
+            "context_window",
+            "max_tokens",
+        )
+        direct_input = direct_input or _first_int(
+            limits,
+            "max_input_tokens",
+            "max_input",
+            "input_tokens",
+            "max_prompt_tokens",
+        )
+        direct_output = direct_output or _first_int(
+            limits,
+            "max_output_tokens",
+            "max_output",
+            "output_tokens",
+            "max_completion_tokens",
+        )
+
+    top_provider = metadata.get("top_provider")
+    if isinstance(top_provider, dict):
+        direct_context = direct_context or _first_int(
+            top_provider,
+            "context_length",
+            "max_context_tokens",
+            "max_completion_tokens",
+        )
+    architecture = metadata.get("architecture")
+    if isinstance(architecture, dict):
+        direct_input = direct_input or _first_int(architecture, "input_token_limit", "max_input_tokens")
+
+    max_context = direct_context or direct_input
+    return {
+        "max_input_tokens": direct_input,
+        "max_output_tokens": direct_output,
+        "max_context_tokens": max_context,
+    }
+
+
+def _first_int(data: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, float):
+            return int(value) if value > 0 else None
+        if isinstance(value, str):
+            compact = value.replace("_", "").replace(",", "").strip()
+            if compact.isdigit():
+                parsed = int(compact)
+                return parsed if parsed > 0 else None
+    return None

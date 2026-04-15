@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.config.models import KeyConfig, ProviderConfig
 from app.core.errors import ErrorClass, GatewayError
 from app.core.types import UnifiedLLMRequest
@@ -39,15 +41,21 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
         )
 
     async def list_models(self, key: KeyConfig) -> list[str]:
+        records = await self.list_model_records(key)
+        return [str(item["id"]) for item in records if item.get("id")]
+
+    async def list_model_records(self, key: KeyConfig) -> list[dict[str, Any]]:
         data = await self._get(self.models_path, key)
         items = self._extract_model_items(data)
-        models: list[str] = []
+        models: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
             model_id = item.get("id") or item.get("name") or item.get("model")
             if model_id:
-                models.append(str(model_id))
+                record = dict(item)
+                record["id"] = str(model_id)
+                models.append(record)
         return models
 
     @staticmethod

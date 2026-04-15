@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Iterable
+from typing import Any
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -66,7 +67,12 @@ class InventoryDiscoveryService:
                     continue
                 started = time.perf_counter()
                 try:
-                    discovered = await adapter.list_models(key)
+                    discovered_records = await adapter.list_model_records(key)
+                    discovered = [
+                        str(item.get("id") or item.get("name") or item.get("model"))
+                        for item in discovered_records
+                        if isinstance(item, dict) and (item.get("id") or item.get("name") or item.get("model"))
+                    ]
                     latency_ms = (time.perf_counter() - started) * 1000
                     key_results.append(
                         InventoryKeyResult(
@@ -83,7 +89,7 @@ class InventoryDiscoveryService:
                     self._merge_models(
                         config=cfg,
                         provider=provider_name,
-                        model_ids=discovered,
+                        model_records=discovered_records,
                         key_id=key.id,
                         models_by_key=models_by_key,
                         special_routes=special_routes,
@@ -127,12 +133,21 @@ class InventoryDiscoveryService:
         *,
         config,
         provider: str,
-        model_ids: Iterable[str],
+        model_records: Iterable[dict[str, Any] | str],
         key_id: str,
         models_by_key: dict[tuple[str, str], DiscoveredModel],
         special_routes: dict[tuple[str, str], ProviderSpecialRoute],
     ) -> None:
-        for model_id in model_ids:
+        for item in model_records:
+            if isinstance(item, dict):
+                model_id_raw = item.get("id") or item.get("name") or item.get("model")
+                metadata = item
+            else:
+                model_id_raw = item
+                metadata = {}
+            if not model_id_raw:
+                continue
+            model_id = str(model_id_raw)
             special_route = get_special_route(provider, model_id)
             if special_route is not None:
                 special_routes[(provider, special_route.route_id)] = special_route
@@ -142,7 +157,12 @@ class InventoryDiscoveryService:
             if existing is None:
                 models_by_key[record_key] = apply_model_overrides(
                     apply_text_filter(
-                        normalize_discovered_model(provider=provider, model_id=model_id, key_id=key_id)
+                        normalize_discovered_model(
+                            provider=provider,
+                            model_id=model_id,
+                            key_id=key_id,
+                            raw_metadata=metadata,
+                        )
                     ),
                     config.inventory.overrides,
                 )

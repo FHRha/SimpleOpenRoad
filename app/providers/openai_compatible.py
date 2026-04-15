@@ -255,10 +255,14 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             ) from exc
 
     async def list_models(self, key: KeyConfig) -> list[str]:
+        records = await self.list_model_records(key)
+        return [str(item["id"]) for item in records if item.get("id")]
+
+    async def list_model_records(self, key: KeyConfig) -> list[dict[str, Any]]:
         data = await self._get(self.models_path, key)
         items = data.get("data", []) if isinstance(data, dict) else []
-        models: list[str] = []
+        models: list[dict[str, Any]] = []
         for item in items:
             if isinstance(item, dict) and "id" in item:
-                models.append(str(item["id"]))
+                models.append(dict(item))
         return models

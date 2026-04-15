@@ -101,8 +101,8 @@ class KeyRegistry:
                     pass
             available.append(key)
 
-        # Higher number means higher priority.
-        available.sort(key=lambda k: (k.priority, k.weight), reverse=True)
+        # Higher number means higher priority; ties are deterministic by key id.
+        available.sort(key=lambda k: (-k.priority, k.id))
         return available
 
     def record_success(self, key_id: str, latency_ms: float) -> None:

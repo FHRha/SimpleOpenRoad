@@ -107,6 +107,14 @@ class EmptyChatFirstModelAdapter(DummyProviderAdapter):
         return await super().chat_completions(request, key)
 
 
+class ContextLimitProviderAdapter(DummyProviderAdapter):
+    async def list_model_records(self, key):  # type: ignore[override]
+        return [
+            {"id": "m1", "context_length": 10},
+            {"id": "m2", "context_length": 1000},
+        ]
+
+
 def _schema_path() -> Path:
     return Path(__file__).resolve().parents[2] / "app" / "storage" / "schema.sql"
 
@@ -224,6 +232,84 @@ async def test_router_prefers_remembered_successful_model_for_same_profile_bucke
 
     assert payload["model"] == "p1/m2"
     assert decision.attempts[0].model == "m2"
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_apply_route_memory_for_different_profile_bucket(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    assert engine.route_memory_repo is not None
+    engine.route_memory_repo.record_success(
+        route_alias="custom/fast",
+        profile="fast",
+        context_bucket="small",
+        provider="p1",
+        model="m2",
+        latency_ms=12.0,
+        updated_at="2026-04-14T00:00:00+00:00",
+    )
+
+    request = UnifiedLLMRequest(
+        model="custom/fast",
+        messages=[ChatMessage(role="user", content="Make an auth migration plan for production")],
+    )
+    context = engine.build_context(route_alias="custom/fast", stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/m1"
+    assert decision.attempts[0].model == "m1"
+
+
+@pytest.mark.asyncio
+async def test_router_does_not_record_route_memory_for_direct_model_request(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    request = UnifiedLLMRequest(model="p1/m1", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias=None, stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/m1"
+    assert decision.resolved_alias is None
+    assert engine.route_memory_repo is not None
+    with engine.route_memory_repo.db.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM route_model_memory").fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_router_skips_candidate_when_context_limit_is_too_small(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    engine.providers = {"p1": ContextLimitProviderAdapter()}
+    engine.inventory_discovery.refresh_providers(engine.providers)
+
+    request = UnifiedLLMRequest(
+        model="custom/fast",
+        messages=[ChatMessage(role="user", content="hello " * 40)],
+    )
+    context = engine.build_context(route_alias="custom/fast", stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/m2"
+    assert [attempt.model for attempt in decision.attempts] == ["m2"]
+
+
+@pytest.mark.asyncio
+async def test_router_reports_context_too_large_when_all_candidates_are_filtered(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    engine.providers = {"p1": ContextLimitProviderAdapter()}
+    engine.inventory_discovery.refresh_providers(engine.providers)
+
+    request = UnifiedLLMRequest(
+        model="p1/m1",
+        messages=[ChatMessage(role="user", content="hello " * 40)],
+    )
+    context = engine.build_context(route_alias=None, stream=False)
+
+    with pytest.raises(GatewayError) as exc_info:
+        await engine.route_chat_completion(request, context)
+
+    assert exc_info.value.status_code == 503
+    candidates = exc_info.value.details["candidates"] if exc_info.value.details else []
+    assert candidates[0]["reason"] == "context_too_large"
+    assert candidates[0]["max_context_tokens"] == 10
 
 
 def test_key_is_blocked_after_max_consecutive_errors(tmp_path: Path) -> None:

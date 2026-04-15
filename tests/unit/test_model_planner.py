@@ -239,6 +239,50 @@ def test_generated_reasoning_alias_can_use_fast_bucket_for_simple_request() -> N
     ]
 
 
+def test_generated_reasoning_alias_keeps_reasoning_floor_for_short_planning_request() -> None:
+    cfg = _adaptive_config()
+    generated_aliases = [
+        GeneratedAlias(
+            alias_id="auto/text/fast",
+            scope="global",
+            modality="text",
+            category="fast",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openai/gpt-5.4-nano")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/text/general",
+            scope="global",
+            modality="text",
+            category="general",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openai/gpt-5.4-mini")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/text/reasoning",
+            scope="global",
+            modality="text",
+            category="reasoning",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openai/gpt-5.4-pro")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/reasoning",
+            scope="compat",
+            modality="text",
+            category="reasoning",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openai/gpt-5.4-pro")],
+        ),
+    ]
+    request = UnifiedLLMRequest(
+        model="auto/reasoning",
+        messages=[ChatMessage(role="user", content="Make an auth migration plan")],
+    )
+
+    candidates, alias = plan_candidates(cfg, request, generated_aliases=generated_aliases)
+
+    assert alias == "auto/reasoning"
+    assert candidates[0].model == "openai/gpt-5.4-pro"
+    assert all(candidate.model != "openai/gpt-5.4-nano" for candidate in candidates)
+
+
 def test_generated_alias_planner_prefers_tool_capable_for_tool_request() -> None:
     cfg = _adaptive_config()
     generated_alias = GeneratedAlias(
@@ -268,3 +312,39 @@ def test_generated_alias_planner_prefers_tool_capable_for_tool_request() -> None
 
     assert alias == "auto/code"
     assert candidates[0].model == "openai/gpt-5.3-codex"
+
+
+def test_generated_free_alias_never_upgrades_to_paid_reasoning_for_complex_request() -> None:
+    cfg = _adaptive_config()
+    generated_aliases = [
+        GeneratedAlias(
+            alias_id="auto/text/free",
+            scope="global",
+            modality="text",
+            category="free",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openrouter/free")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/text/reasoning",
+            scope="global",
+            modality="text",
+            category="reasoning",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openai/gpt-5.4-pro")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/free",
+            scope="compat",
+            modality="text",
+            category="free",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openrouter/free")],
+        ),
+    ]
+    request = UnifiedLLMRequest(
+        model="auto/free",
+        messages=[ChatMessage(role="user", content="Make a production auth migration plan")],
+    )
+
+    candidates, alias = plan_candidates(cfg, request, generated_aliases=generated_aliases)
+
+    assert alias == "auto/free"
+    assert [candidate.model for candidate in candidates] == ["openrouter/free"]

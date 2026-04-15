@@ -8,6 +8,10 @@ from datetime import datetime
 from app.config.models import KeyConfig
 
 
+def _priority_order_key(key: KeyConfig) -> tuple[int, str]:
+    return (-key.priority, key.id)
+
+
 def select_keys(
     strategy: str,
     keys: list[KeyConfig],
@@ -15,7 +19,7 @@ def select_keys(
 ) -> list[KeyConfig]:
     runtime = runtime_by_key or {}
     if strategy == "strict_priority":
-        return sorted(keys, key=lambda k: (k.priority, k.weight), reverse=True)
+        return sorted(keys, key=_priority_order_key)
 
     if strategy == "random_by_weight":
         weighted = []
@@ -36,6 +40,7 @@ def select_keys(
             key=lambda k: (
                 int(runtime.get(k.id, {}).get("consecutive_errors", 0)),
                 -k.priority,
+                k.id,
             ),
         )
 
@@ -52,4 +57,4 @@ def select_keys(
         return sorted(keys, key=lru_score)
 
     # Fallback to deterministic behavior.
-    return sorted(keys, key=lambda k: (k.priority, k.weight), reverse=True)
+    return sorted(keys, key=_priority_order_key)

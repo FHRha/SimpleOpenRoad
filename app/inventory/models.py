@@ -27,6 +27,9 @@ class DiscoveredModel:
     is_deprecated: bool = False
     is_text_candidate: bool = False
     excluded_reason: str | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_context_tokens: int | None = None
     chat_state: CapabilityState = "unknown"
     responses_state: CapabilityState = "unknown"
     stream_state: CapabilityState = "unknown"

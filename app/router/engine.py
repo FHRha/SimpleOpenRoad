@@ -20,24 +20,16 @@ from app.providers.registry import build_provider_registry
 from app.registry.keys import KeyRegistry
 from app.router.backoff import sleep_with_backoff
 from app.router.classifier import classify_error
-from app.router.model_planner import classify_request_profile, estimate_request_tokens, plan_candidates
+from app.router.context_limits import filter_candidates_by_context, limits_from_snapshot
+from app.router.model_planner import plan_candidates
 from app.router.policy import policy_action, should_retry_same_key, should_switch_provider
+from app.router.request_analyzer import analyze_request_route
 from app.router.response_validator import validate_chat_completion_payload, validate_responses_payload
 from app.router.selector import select_keys
 from app.router.stream_normalizer import normalize_openai_stream
 from app.storage.repositories.attempts_repo import AttemptsRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
-
-
-def _context_bucket(token_estimate: int) -> str:
-    if token_estimate < 8_000:
-        return "small"
-    if token_estimate < 32_000:
-        return "medium"
-    if token_estimate < 128_000:
-        return "large"
-    return "huge"
 
 
 class RoutingEngine:
@@ -119,9 +111,23 @@ class RoutingEngine:
         ]
 
     @staticmethod
-    def _route_memory_key(request: UnifiedLLMRequest) -> tuple[str, str]:
-        profile = classify_request_profile(request)
-        return profile, _context_bucket(estimate_request_tokens(request))
+    def _route_memory_key(request: UnifiedLLMRequest, analysis=None) -> tuple[str, str]:
+        if analysis is None:
+            analysis = analyze_request_route(request)
+        return analysis.profile, analysis.context_bucket
+
+    @staticmethod
+    def _analysis_detail(request: UnifiedLLMRequest) -> dict:
+        analysis = analyze_request_route(request)
+        return {
+            "intent": analysis.intent,
+            "profile": analysis.profile,
+            "complexity_score": analysis.complexity_score,
+            "context_bucket": analysis.context_bucket,
+            "token_estimate": analysis.token_estimate,
+            "requires_tools": analysis.requires_tools,
+            "reasons": analysis.reasons,
+        }
 
     def _prioritize_remembered_candidate(
         self,
@@ -130,18 +136,39 @@ class RoutingEngine:
         resolved_alias: str | None,
         profile: str,
         context_bucket: str,
-    ) -> list[RouteCandidate]:
-        if not resolved_alias or self.route_memory_repo is None:
-            return candidates
+    ) -> tuple[list[RouteCandidate], dict]:
+        detail = {
+            "status": "ignored_direct" if not resolved_alias else "disabled",
+            "route_alias": resolved_alias,
+            "profile": profile,
+            "context_bucket": context_bucket,
+        }
+        if not resolved_alias:
+            return candidates, detail
+        if self.route_memory_repo is None:
+            return candidates, detail
         remembered = self.route_memory_repo.get(resolved_alias, profile, context_bucket)
         if not remembered:
-            return candidates
+            detail["status"] = "miss"
+            return candidates, detail
         remembered_marker = (remembered.get("provider"), remembered.get("model"))
+        detail.update(
+            {
+                "status": "stale",
+                "remembered_provider": remembered_marker[0],
+                "remembered_model": remembered_marker[1],
+                "success_count": remembered.get("success_count"),
+                "avg_latency_ms": remembered.get("avg_latency_ms"),
+                "updated_at": remembered.get("updated_at"),
+            }
+        )
         for index, candidate in enumerate(candidates):
             if (candidate.provider, candidate.model) != remembered_marker:
                 continue
-            return [candidate, *candidates[:index], *candidates[index + 1 :]]
-        return candidates
+            detail["status"] = "hit"
+            detail["position_before"] = index + 1
+            return [candidate, *candidates[:index], *candidates[index + 1 :]], detail
+        return candidates, detail
 
     def _remember_successful_candidate(
         self,
@@ -257,9 +284,15 @@ class RoutingEngine:
         if snapshot is None:
             snapshot = await self.inventory_discovery.refresh()
         generated_aliases = [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+        analysis = analyze_request_route(request)
         candidates, resolved_alias = plan_candidates(config, request, generated_aliases=generated_aliases)
-        route_profile, context_bucket = self._route_memory_key(request)
-        candidates = self._prioritize_remembered_candidate(
+        candidates, context_skipped_details = filter_candidates_by_context(
+            candidates,
+            analysis.token_estimate,
+            limits_from_snapshot(snapshot),
+        )
+        route_profile, context_bucket = self._route_memory_key(request, analysis)
+        candidates, route_memory_detail = self._prioritize_remembered_candidate(
             candidates=candidates,
             resolved_alias=resolved_alias,
             profile=route_profile,
@@ -279,7 +312,7 @@ class RoutingEngine:
         runtime_states = {s["key_id"]: s for s in self.key_registry.runtime_repo.list_states()}
         final_error: GatewayError | None = None
         attempt_index = 0
-        candidate_details: list[dict] = []
+        candidate_details: list[dict] = list(context_skipped_details)
 
         for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
@@ -476,7 +509,11 @@ class RoutingEngine:
             message="No healthy route candidates available",
             error_class=ErrorClass.PROVIDER_UNAVAILABLE,
             status_code=503,
-            details={"candidates": candidate_details},
+            details={
+                "analysis": self._analysis_detail(request),
+                "route_memory": route_memory_detail,
+                "candidates": candidate_details,
+            },
         )
 
     async def route_chat_completion_stream(
@@ -489,9 +526,15 @@ class RoutingEngine:
         if snapshot is None:
             snapshot = await self.inventory_discovery.refresh()
         generated_aliases = [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
+        analysis = analyze_request_route(request)
         candidates, resolved_alias = plan_candidates(config, request, generated_aliases=generated_aliases)
-        route_profile, context_bucket = self._route_memory_key(request)
-        candidates = self._prioritize_remembered_candidate(
+        candidates, context_skipped_details = filter_candidates_by_context(
+            candidates,
+            analysis.token_estimate,
+            limits_from_snapshot(snapshot),
+        )
+        route_profile, context_bucket = self._route_memory_key(request, analysis)
+        candidates, route_memory_detail = self._prioritize_remembered_candidate(
             candidates=candidates,
             resolved_alias=resolved_alias,
             profile=route_profile,
@@ -511,7 +554,7 @@ class RoutingEngine:
         runtime_states = {s["key_id"]: s for s in self.key_registry.runtime_repo.list_states()}
         final_error: GatewayError | None = None
         attempt_index = 0
-        candidate_details: list[dict] = []
+        candidate_details: list[dict] = list(context_skipped_details)
 
         for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
@@ -757,7 +800,11 @@ class RoutingEngine:
             message="No healthy route candidates available for stream",
             error_class=ErrorClass.PROVIDER_UNAVAILABLE,
             status_code=503,
-            details={"candidates": candidate_details},
+            details={
+                "analysis": self._analysis_detail(request),
+                "route_memory": route_memory_detail,
+                "candidates": candidate_details,
+            },
         )
 
     @staticmethod

@@ -37,6 +37,18 @@ class SuccessAdapter(ProviderAdapter):
         return self.models
 
 
+class MetadataAdapter(SuccessAdapter):
+    def __init__(self, provider_name: str, config: ProviderConfig, records: list[dict]):
+        super().__init__(provider_name=provider_name, config=config, models=[])
+        self.records = records
+
+    async def list_model_records(self, key: KeyConfig) -> list[dict]:  # type: ignore[override]
+        return self.records
+
+    async def list_models(self, key: KeyConfig) -> list[str]:
+        return [str(item["id"]) for item in self.records]
+
+
 class FailingAdapter(ProviderAdapter):
     def __init__(self, provider_name: str, config: ProviderConfig, error: GatewayError):
         super().__init__(provider_name=provider_name, config=config)
@@ -196,6 +208,36 @@ async def test_inventory_discovery_applies_provider_specific_text_filters() -> N
     assert models[("openrouter", "openrouter/bodybuilder")].excluded_reason == "special_router_route"
     assert models[("openrouter", "perplexity/sonar-pro-search")].excluded_reason == "search_or_retrieval_route"
     assert models[("openrouter", "openai/gpt-5-mini")].is_text_candidate is True
+
+
+@pytest.mark.asyncio
+async def test_inventory_discovery_stores_context_limits_from_model_metadata() -> None:
+    runtime_config = _runtime_config()
+    openrouter_cfg = runtime_config.get().providers["openrouter"]
+    service = InventoryDiscoveryService(
+        runtime_config=runtime_config,
+        providers={
+            "openrouter": MetadataAdapter(
+                provider_name="openrouter",
+                config=openrouter_cfg,
+                records=[
+                    {
+                        "id": "openai/gpt-5-mini",
+                        "context_length": 128000,
+                        "limits": {"max_output_tokens": 8192},
+                    }
+                ],
+            ),
+        },
+    )
+
+    snapshot = await service.refresh()
+
+    model = snapshot.models[0]
+    assert model.model_id == "openai/gpt-5-mini"
+    assert model.max_context_tokens == 128000
+    assert model.max_output_tokens == 8192
+    assert model.raw_metadata["context_length"] == 128000
 
 
 @pytest.mark.asyncio

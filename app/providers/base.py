@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from typing import Any
 
 from app.config.models import KeyConfig, ProviderConfig
 from app.core.types import UnifiedLLMRequest
@@ -35,3 +36,7 @@ class ProviderAdapter(ABC):
     @abstractmethod
     async def list_models(self, key: KeyConfig) -> list[str]:
         """Return list of models available for this provider key."""
+
+    async def list_model_records(self, key: KeyConfig) -> list[dict[str, Any]]:
+        """Return provider model records with optional metadata."""
+        return [{"id": model_id} for model_id in await self.list_models(key)]

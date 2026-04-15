@@ -36,9 +36,16 @@ from app.core.security import is_configured_secret
 from app.core.types import ChatMessage, RouteCandidate, UnifiedLLMRequest
 from app.core.utils import mask_secret
 from app.registry.keys import KeyRegistry
-from app.router.model_planner import classify_request_profile, plan_candidates
+from app.router.context_limits import (
+    context_skip_detail,
+    filter_candidates_by_context,
+    limits_from_snapshot_dict,
+)
+from app.router.model_planner import plan_candidates
+from app.router.request_analyzer import RequestRouteAnalysis, analyze_request_route
 from app.storage.db import SQLiteDB
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
+from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 
 cli_app = typer.Typer(
     help="SimpleOpenRoad AI gateway CLI",
@@ -517,6 +524,13 @@ def _runtime_key_registry(cfg: GatewayConfig) -> KeyRegistry:
     return registry
 
 
+def _route_memory_repo(cfg: GatewayConfig) -> RouteModelMemoryRepository:
+    db = SQLiteDB(cfg.storage.sqlite_path)
+    schema_path = files("app.storage").joinpath("schema.sql")
+    db.initialize(str(schema_path))
+    return RouteModelMemoryRepository(db)
+
+
 def _alias_raw_candidates(
     cfg: GatewayConfig,
     model: str,
@@ -537,6 +551,37 @@ def _alias_raw_candidates(
         provider, model_name = model.split("/", 1)
         return [RouteCandidate(provider=provider, model=model_name)]
     return [RouteCandidate(provider=provider_name, model=model) for provider_name in cfg.providers]
+
+
+def _generated_candidate_sources(snapshot: dict[str, Any] | None) -> dict[tuple[str, str], list[str]]:
+    sources: dict[tuple[str, str], list[str]] = {}
+    for alias_id, alias in _generated_alias_map(snapshot).items():
+        candidates = alias.get("candidates", [])
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            provider = str(candidate.get("provider", "")).strip()
+            model_id = str(candidate.get("model_id", "")).strip()
+            if not provider or not model_id:
+                continue
+            sources.setdefault((provider, model_id), []).append(alias_id)
+    return sources
+
+
+def _candidate_source_label(
+    candidate: RouteCandidate,
+    *,
+    alias: str | None,
+    generated_sources: dict[tuple[str, str], list[str]],
+) -> str:
+    sources = generated_sources.get((candidate.provider, candidate.model), [])
+    if alias and alias in sources:
+        return alias
+    if sources:
+        return sources[0]
+    return alias or "direct model"
 
 
 def _summarize_values(values: list[Any], empty: str = "-") -> str:
@@ -610,6 +655,84 @@ def _candidate_runtime_details(
     return {"status": "ready", "reason": "keys_available", **details}
 
 
+def _analysis_value_rows(analysis: RequestRouteAnalysis) -> list[tuple[str, str]]:
+    reasons = ", ".join(analysis.reasons) if analysis.reasons else "-"
+    return [
+        ("Intent", analysis.intent),
+        ("Profile", analysis.profile),
+        ("Complexity", str(analysis.complexity_score)),
+        ("Context bucket", analysis.context_bucket),
+        ("Token estimate", str(analysis.token_estimate)),
+        ("Tools", "yes" if analysis.requires_tools else "no"),
+        ("Reasons", reasons),
+    ]
+
+
+def _print_request_analysis(analysis: RequestRouteAnalysis, title: str = "Request Route Analysis") -> None:
+    table = Table(title=title, box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    for key, value in _analysis_value_rows(analysis):
+        table.add_row(key, value)
+    console.print(table)
+
+
+def _extract_route_analysis(response: httpx.Response) -> dict[str, Any]:
+    detail = _extract_error_detail(response)
+    details = detail.get("details")
+    if not isinstance(details, dict):
+        return {}
+    analysis = details.get("analysis")
+    return analysis if isinstance(analysis, dict) else {}
+
+
+def _extract_route_memory(response: httpx.Response) -> dict[str, Any]:
+    detail = _extract_error_detail(response)
+    details = detail.get("details")
+    if not isinstance(details, dict):
+        return {}
+    route_memory = details.get("route_memory")
+    return route_memory if isinstance(route_memory, dict) else {}
+
+
+def _print_route_analysis_dict(analysis: dict[str, Any]) -> None:
+    if not analysis:
+        return
+    table = Table(title="Request Route Analysis", box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    for key in ("intent", "profile", "complexity_score", "context_bucket", "token_estimate", "requires_tools"):
+        if key in analysis:
+            table.add_row(key, str(analysis.get(key)))
+    reasons = analysis.get("reasons")
+    if isinstance(reasons, list):
+        table.add_row("reasons", ", ".join(str(item) for item in reasons) or "-")
+    console.print(table)
+
+
+def _print_route_memory_dict(route_memory: dict[str, Any]) -> None:
+    if not route_memory:
+        return
+    table = Table(title="Route Memory", box=box.ASCII)
+    table.add_column("Field")
+    table.add_column("Value")
+    for key in (
+        "status",
+        "route_alias",
+        "profile",
+        "context_bucket",
+        "remembered_provider",
+        "remembered_model",
+        "success_count",
+        "avg_latency_ms",
+        "updated_at",
+        "position_before",
+    ):
+        if key in route_memory:
+            table.add_row(key, str(route_memory.get(key)))
+    console.print(table)
+
+
 def _print_candidate_diagnostics(candidates: list[dict]) -> None:
     if not candidates:
         return
@@ -620,6 +743,7 @@ def _print_candidate_diagnostics(candidates: list[dict]) -> None:
     table.add_column("Status")
     table.add_column("Reason")
     table.add_column("Keys")
+    table.add_column("Context")
     for index, item in enumerate(candidates, start=1):
         table.add_row(
             str(index),
@@ -628,8 +752,21 @@ def _print_candidate_diagnostics(candidates: list[dict]) -> None:
             str(item.get("status", "")),
             str(item.get("reason", "")),
             str(item.get("available_keys", "")),
+            (
+                f"{item.get('token_estimate')}>{item.get('max_context_tokens')}"
+                if item.get("token_estimate") and item.get("max_context_tokens")
+                else ""
+            ),
         )
     console.print(table)
+    for index, item in enumerate(candidates, start=1):
+        console.print(
+            "Candidate diagnostic: "
+            f"#{index} provider={item.get('provider', '')} "
+            f"model={item.get('model', '')} "
+            f"status={item.get('status', '')} "
+            f"reason={item.get('reason', '')}"
+        )
 
 
 def _extract_error_detail(response: httpx.Response) -> dict[str, Any]:
@@ -677,6 +814,8 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
         messages=[ChatMessage(role="user", content="hello")],
         metadata={"sor_profile": "fast"},
     )
+    analysis = analyze_request_route(request)
+    memory_repo = _route_memory_repo(cfg)
     generated_aliases = []
     if isinstance(snapshot, dict):
         raw_generated = snapshot.get("generated_aliases", [])
@@ -705,17 +844,96 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
                 if isinstance(item, dict)
             ]
     planned, alias = plan_candidates(cfg, request, generated_aliases=generated_aliases)
+    context_limits = limits_from_snapshot_dict(snapshot)
+    planned, context_skipped = filter_candidates_by_context(planned, analysis.token_estimate, context_limits)
     raw_candidates = _alias_raw_candidates(cfg, model, snapshot)
     planned_keys = {(candidate.provider, candidate.model) for candidate in planned}
+    generated_sources = _generated_candidate_sources(snapshot)
+    route_memory = memory_repo.get(alias, analysis.profile, analysis.context_bucket) if alias else None
+    remembered_marker = (
+        route_memory.get("provider"),
+        route_memory.get("model"),
+    ) if route_memory else (None, None)
+    route_memory_status = "ignored_direct"
+    if alias and route_memory is None:
+        route_memory_status = "miss"
+    elif alias and remembered_marker in planned_keys:
+        route_memory_status = "hit"
+        planned = [
+            candidate
+            for candidate in planned
+            if (candidate.provider, candidate.model) == remembered_marker
+        ] + [
+            candidate
+            for candidate in planned
+            if (candidate.provider, candidate.model) != remembered_marker
+        ]
+        planned_keys = {(candidate.provider, candidate.model) for candidate in planned}
+    elif alias and route_memory is not None:
+        route_memory_status = "stale"
 
     summary = Table(title="Route Preview", box=box.ASCII)
     summary.add_column("Field")
     summary.add_column("Value")
     summary.add_row("Requested model", model)
     summary.add_row("Resolved alias", alias or "<direct model>")
-    summary.add_row("Estimated profile", classify_request_profile(request))
+    summary.add_row(
+        "Selected source",
+        _candidate_source_label(planned[0], alias=alias, generated_sources=generated_sources) if planned else "<none>",
+    )
+    summary.add_row("Detected intent", analysis.intent)
+    summary.add_row("Route profile", analysis.profile)
+    summary.add_row("Complexity", str(analysis.complexity_score))
+    summary.add_row("Context bucket", analysis.context_bucket)
+    summary.add_row("Route memory", route_memory_status)
+    if route_memory:
+        summary.add_row("Remembered model", f"{route_memory.get('provider')}/{route_memory.get('model')}")
+    if context_skipped:
+        summary.add_row("Context filtered", str(len(context_skipped)))
     summary.add_row("Planned candidates", str(len(planned)))
     console.print(summary)
+    _print_request_analysis(analysis)
+    if route_memory:
+        _print_route_memory_dict(
+            {
+                "status": route_memory_status,
+                "route_alias": alias,
+                "profile": analysis.profile,
+                "context_bucket": analysis.context_bucket,
+                "remembered_provider": route_memory.get("provider"),
+                "remembered_model": route_memory.get("model"),
+                "success_count": route_memory.get("success_count"),
+                "avg_latency_ms": route_memory.get("avg_latency_ms"),
+                "updated_at": route_memory.get("updated_at"),
+            }
+        )
+
+    effective_table = Table(title="Effective Candidate Order", box=box.ASCII)
+    effective_table.add_column("#")
+    effective_table.add_column("Provider")
+    effective_table.add_column("Model")
+    effective_table.add_column("Source")
+    effective_table.add_column("Memory")
+    effective_table.add_column("Context")
+    for index, candidate in enumerate(planned, start=1):
+        limit = context_limits.get((candidate.provider, candidate.model))
+        context_label = (
+            str(limit.max_context_tokens or limit.max_input_tokens)
+            if limit and (limit.max_context_tokens or limit.max_input_tokens)
+            else "unknown"
+        )
+        memory_label = "remembered" if route_memory_status == "hit" and index == 1 else "-"
+        effective_table.add_row(
+            str(index),
+            candidate.provider,
+            candidate.model,
+            _candidate_source_label(candidate, alias=alias, generated_sources=generated_sources),
+            memory_label,
+            context_label,
+        )
+    if not planned:
+        effective_table.add_row("-", "-", "-", "-", route_memory_status, "no candidates after filters")
+    console.print(effective_table)
 
     table = Table(title="Candidates", box=box.ASCII)
     table.add_column("#")
@@ -724,6 +942,7 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
     table.add_column("Order")
     table.add_column("Status")
     table.add_column("Reason")
+    table.add_column("Context")
     runtime_table = Table(title="Key Runtime Details", box=box.ASCII)
     runtime_table.add_column("#")
     runtime_table.add_column("Provider")
@@ -737,6 +956,12 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
     runtime_lines: list[str] = []
     for index, candidate in enumerate(raw_candidates, start=1):
         details = _candidate_runtime_details(cfg, registry, candidate, runtime_map)
+        context_skip = context_skip_detail(candidate, analysis.token_estimate, context_limits)
+        context_label = "-"
+        if context_skip is not None:
+            details["status"] = "skipped"
+            details["reason"] = "context_too_large"
+            context_label = f"{context_skip['token_estimate']}>{context_skip['max_context_tokens']}"
         if (candidate.provider, candidate.model) not in planned_keys and details["status"] == "ready":
             details["status"] = "filtered"
             details["reason"] = "not_selected_by_route_planner"
@@ -752,6 +977,7 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
             order,
             details["status"],
             details["reason"],
+            context_label,
         )
         runtime_table.add_row(
             str(index),
@@ -773,6 +999,24 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
             f"last_error={details['last_error']}"
         )
     console.print(table)
+    for index, candidate in enumerate(raw_candidates, start=1):
+        details = _candidate_runtime_details(cfg, registry, candidate, runtime_map)
+        context_skip = context_skip_detail(candidate, analysis.token_estimate, context_limits)
+        if context_skip is not None:
+            details["status"] = "skipped"
+            details["reason"] = "context_too_large"
+        if (candidate.provider, candidate.model) not in planned_keys and details["status"] == "ready":
+            details["status"] = "filtered"
+            details["reason"] = "not_selected_by_route_planner"
+        console.print(
+            "Candidate preview: "
+            f"#{index} provider={candidate.provider} "
+            f"model={candidate.model} "
+            f"order={next((str(i) for i, item in enumerate(planned, start=1) if item.provider == candidate.provider and item.model == candidate.model), '-')} "
+            f"source={_candidate_source_label(candidate, alias=alias, generated_sources=generated_sources)} "
+            f"status={details['status']} "
+            f"reason={details['reason']}"
+        )
     console.print("Runtime status details")
     for line in runtime_lines:
         console.print(line)
@@ -802,7 +1046,17 @@ def _print_troubleshooting_guide() -> None:
     table.add_row(
         "503 No healthy route candidates",
         "All candidates were filtered, cooling down, disabled, invalid, or unsupported.",
-        "Run Route preview, validate keys, enable provider/key, or adjust the alias chain.",
+        "Run Route preview and inspect Request Route Analysis, Effective Candidate Order, and Candidate preview lines.",
+    )
+    table.add_row(
+        "context_too_large",
+        "Known model context limit is smaller than the estimated request tokens.",
+        "Use a larger-context alias/model, reduce history, or refresh inventory if limits changed.",
+    )
+    table.add_row(
+        "Route memory hit/stale/miss",
+        "SOR remembers the last successful model per alias/profile/context bucket.",
+        "A hit only reorders candidates; stale is ignored; direct model requests show ignored_direct.",
     )
     table.add_row(
         "Invalid/empty API response",
@@ -954,6 +1208,9 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
         "model": model,
         "messages": [{"role": "user", "content": "hello"}],
     }
+    analysis = analyze_request_route(
+        UnifiedLLMRequest(model=model, messages=[ChatMessage(role="user", content="hello")])
+    )
     headers = {"Content-Type": "application/json"}
     if cfg.security.require_master_key:
         headers["x-api-key"] = token
@@ -964,6 +1221,10 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
     table.add_row("URL", url)
     table.add_row("Model", model)
     table.add_row("Auth", "x-api-key" if cfg.security.require_master_key else "disabled")
+    table.add_row("Intent", analysis.intent)
+    table.add_row("Profile", analysis.profile)
+    table.add_row("Complexity", str(analysis.complexity_score))
+    table.add_row("Context bucket", analysis.context_bucket)
     try:
         response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
         table.add_row("HTTP status", str(response.status_code))
@@ -1010,6 +1271,8 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
         table.add_row("Error", str(exc))
     console.print(table)
     if "response" in locals() and response.status_code != 200:
+        _print_route_analysis_dict(_extract_route_analysis(response))
+        _print_route_memory_dict(_extract_route_memory(response))
         _print_candidate_diagnostics(_extract_candidate_diagnostics(response))
 
 
@@ -1559,9 +1822,19 @@ def _interactive_add_provider_key(config_path: str) -> None:
     default_key_id = f"{provider}-key-{len(existing_keys) + 1}"
     console.print("Key ID is a local name for this provider key. It is used in logs, stats, health checks and removal commands.")
     console.print("It is not sent to the provider. Example: openrouter-main or gemini-backup-1.")
-    key_id = typer.prompt("Key ID", default=default_key_id).strip()
-    if not key_id:
-        raise typer.BadParameter("Key ID cannot be empty")
+    while True:
+        key_id = typer.prompt("Key ID", default=default_key_id).strip()
+        if not key_id:
+            raise typer.BadParameter("Key ID cannot be empty")
+        existing_key_ids = _configured_key_ids_by_provider(providers)
+        existing_provider = existing_key_ids.get(key_id)
+        if existing_provider is None:
+            break
+        console.print(
+            f"Key ID '{key_id}' already exists in provider '{existing_provider}'. "
+            "Enter another unique local key ID."
+        )
+        default_key_id = f"{provider}-key-{len(existing_keys) + 2}"
 
     secret = typer.prompt("API key", hide_input=True, confirmation_prompt=True).strip()
     if not secret:
@@ -1581,6 +1854,23 @@ def _interactive_add_provider_key(config_path: str) -> None:
         config_path=config_path,
         validate=validate_now,
     )
+
+
+def _configured_key_ids_by_provider(providers: dict[str, Any]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for provider_name, provider_cfg in providers.items():
+        if not isinstance(provider_cfg, dict):
+            continue
+        keys = provider_cfg.get("keys", [])
+        if not isinstance(keys, list):
+            continue
+        for item in keys:
+            if not isinstance(item, dict):
+                continue
+            key_id = str(item.get("id", "")).strip()
+            if key_id:
+                result[key_id] = str(provider_name)
+    return result
 
 
 @cli_app.command("init")
@@ -1869,6 +2159,12 @@ def keys_add(
     keys = provider_cfg.setdefault("keys", [])
     if any(str(item.get("id")) == key_id for item in keys):
         raise typer.BadParameter(f"Key already exists: {key_id}")
+    existing_key_ids = _configured_key_ids_by_provider(providers)
+    existing_provider = existing_key_ids.get(key_id)
+    if existing_provider is not None and existing_provider != provider:
+        raise typer.BadParameter(
+            f"Key id must be globally unique. '{key_id}' already exists in provider '{existing_provider}'."
+        )
 
     keys.append(
         {
