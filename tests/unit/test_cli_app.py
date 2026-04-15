@@ -1524,6 +1524,87 @@ def test_cli_keys_add_and_remove(tmp_path: Path) -> None:
     assert "github-backup" not in ids_after
 
 
+def test_cli_keys_add_refreshes_generated_aliases_after_validation(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    calls = {"validate": 0, "refresh": 0}
+
+    class FakeAdminService:
+        async def validate_key(self, provider: str, key_id: str) -> dict:
+            calls["validate"] += 1
+            return {
+                "provider": provider,
+                "key_id": key_id,
+                "status": "valid",
+                "models": ["gpt-4.1-mini"],
+                "latency_ms": 1.0,
+                "error_code": None,
+                "error_message": None,
+                "checked_at": "2026-04-15T00:00:00+00:00",
+            }
+
+        async def refresh_inventory(self) -> dict:
+            calls["refresh"] += 1
+            return {"generated_aliases": [{"alias_id": "auto/fast"}]}
+
+    class FakeContainer:
+        admin_service = FakeAdminService()
+
+    monkeypatch.setattr("app.cli.app._container", lambda config_path: FakeContainer())
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "keys",
+            "add",
+            "--provider",
+            "github",
+            "--key-id",
+            "github-backup",
+            "--secret",
+            "test-secret",
+            "--config-path",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == {"validate": 1, "refresh": 1}
+    assert "Model aliases refreshed: 1 generated aliases available." in result.stdout
+
+
+def test_cli_keys_add_no_validate_does_not_refresh_aliases(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    calls = {"container": 0}
+
+    def _fake_container(config_path: str):
+        calls["container"] += 1
+        raise AssertionError("container should not be created for --no-validate")
+
+    monkeypatch.setattr("app.cli.app._container", _fake_container)
+
+    result = runner.invoke(
+        cli_app,
+        [
+            "keys",
+            "add",
+            "--provider",
+            "github",
+            "--key-id",
+            "github-backup",
+            "--secret",
+            "test-secret",
+            "--no-validate",
+            "--config-path",
+            str(config_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == {"container": 0}
+
+
 def test_cli_keys_add_rejects_duplicate_id_across_providers(tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)

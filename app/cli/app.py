@@ -323,6 +323,22 @@ def _current_inventory_snapshot(config_path: str, refresh: bool = False) -> dict
     return container.admin_service.current_inventory()
 
 
+def _refresh_inventory_after_key_change(config_path: str) -> None:
+    import asyncio
+
+    try:
+        container = _container(config_path)
+        snapshot = asyncio.run(container.admin_service.refresh_inventory())
+    except Exception as exc:  # noqa: BLE001 - key changes must not be rolled back by inventory refresh failures.
+        console.print(f"Model alias refresh failed: {exc}")
+        console.print("Run Providers and keys -> Validate keys, or restart/refresh inventory later.")
+        return
+
+    generated = snapshot.get("generated_aliases", []) if isinstance(snapshot, dict) else []
+    alias_count = len(generated) if isinstance(generated, list) else 0
+    console.print(f"Model aliases refreshed: {alias_count} generated aliases available.")
+
+
 def _generated_alias_ids(snapshot: dict[str, Any] | None) -> list[str]:
     if not isinstance(snapshot, dict):
         return []
@@ -2189,6 +2205,7 @@ def keys_add(
         container = _container(str(path))
         result = asyncio.run(container.admin_service.validate_key(provider=provider, key_id=key_id))
         _print_key_validation_results([result], title="Key Validation")
+        _refresh_inventory_after_key_change(str(path))
 
 
 @keys_app.command("wizard")
@@ -2231,10 +2248,12 @@ def keys_validate(
     if provider and key_id:
         result = asyncio.run(container.admin_service.validate_key(provider=provider, key_id=key_id))
         _print_key_validation_results([result], title="Key Validation")
+        _refresh_inventory_after_key_change(config_path)
         return
 
     results = asyncio.run(container.admin_service.validate_all_keys())
     _print_key_validation_results(results, title="Key Validation")
+    _refresh_inventory_after_key_change(config_path)
 
 
 @keys_app.command("enable")
