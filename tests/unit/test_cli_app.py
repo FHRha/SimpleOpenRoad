@@ -1527,7 +1527,7 @@ def test_cli_keys_add_and_remove(tmp_path: Path) -> None:
 def test_cli_keys_add_refreshes_generated_aliases_after_validation(monkeypatch, tmp_path: Path) -> None:
     runner = CliRunner()
     config_path = _write_config(tmp_path)
-    calls = {"validate": 0, "refresh": 0}
+    calls = {"validate": 0, "refresh": 0, "reload": 0}
 
     class FakeAdminService:
         async def validate_key(self, provider: str, key_id: str) -> dict:
@@ -1550,7 +1550,24 @@ def test_cli_keys_add_refreshes_generated_aliases_after_validation(monkeypatch, 
     class FakeContainer:
         admin_service = FakeAdminService()
 
+    class FakeReloadResponse:
+        status_code = 200
+
+        def json(self):
+            return {"generated_aliases": 1}
+
+        @property
+        def text(self) -> str:
+            return ""
+
+    def _fake_post(url: str, **kwargs):
+        calls["reload"] += 1
+        assert url.endswith("/admin/reload-config")
+        assert kwargs["json"]["config_path"] == str(config_path.resolve())
+        return FakeReloadResponse()
+
     monkeypatch.setattr("app.cli.app._container", lambda config_path: FakeContainer())
+    monkeypatch.setattr("app.cli.app.httpx.post", _fake_post)
 
     result = runner.invoke(
         cli_app,
@@ -1569,8 +1586,9 @@ def test_cli_keys_add_refreshes_generated_aliases_after_validation(monkeypatch, 
     )
 
     assert result.exit_code == 0
-    assert calls == {"validate": 1, "refresh": 1}
+    assert calls == {"validate": 1, "refresh": 1, "reload": 1}
     assert "Model aliases refreshed: 1 generated aliases available." in result.stdout
+    assert "Running gateway reloaded (1 generated aliases)." in result.stdout
 
 
 def test_cli_keys_add_no_validate_does_not_refresh_aliases(monkeypatch, tmp_path: Path) -> None:

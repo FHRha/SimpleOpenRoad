@@ -36,8 +36,13 @@ async def reload_config(
             container.key_registry.sync_defaults(container.runtime_config.get())
             container.routing_engine.refresh_providers()
             container.health_checker.providers = container.routing_engine.providers
-            return {"status": "ok"}
-        return container.admin_service.reload_config()
+            container.inventory_discovery.refresh_providers(container.routing_engine.providers)
+            snapshot = await container.admin_service.refresh_inventory()
+            return {"status": "ok", "generated_aliases": len(snapshot.get("generated_aliases", []))}
+        result = container.admin_service.reload_config()
+        snapshot = await container.admin_service.refresh_inventory()
+        result["generated_aliases"] = len(snapshot.get("generated_aliases", []))
+        return result
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

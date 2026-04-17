@@ -337,6 +337,9 @@ def _refresh_inventory_after_key_change(config_path: str) -> None:
     generated = snapshot.get("generated_aliases", []) if isinstance(snapshot, dict) else []
     alias_count = len(generated) if isinstance(generated, list) else 0
     console.print(f"Model aliases refreshed: {alias_count} generated aliases available.")
+    if _reload_running_gateway(config_path=config_path, quiet=False):
+        return
+    console.print("If the gateway service is running, restart it before testing new keys.")
 
 
 def _generated_alias_ids(snapshot: dict[str, Any] | None) -> list[str]:
@@ -1172,6 +1175,53 @@ def _current_master_api_key() -> str:
     return os.getenv("MASTER_API_KEY") or _load_env_file().get("MASTER_API_KEY", "")
 
 
+def _current_admin_api_key() -> str:
+    created_env, generated_keys = _ensure_env_master_admin_keys()
+    _print_env_setup_hint(created_env=created_env, generated_keys=generated_keys)
+    return os.getenv("ADMIN_API_KEY") or _load_env_file().get("ADMIN_API_KEY", "")
+
+
+def _reload_running_gateway(config_path: str, cfg: GatewayConfig | None = None, *, quiet: bool = False) -> bool:
+    cfg = cfg or load_gateway_config(config_path=config_path)
+    if not cfg.security.require_admin_key:
+        headers: dict[str, str] = {}
+    else:
+        admin_key = _current_admin_api_key()
+        if not admin_key:
+            if not quiet:
+                console.print("Running gateway reload skipped: ADMIN_API_KEY is not configured.")
+            return False
+        headers = {"x-admin-key": admin_key}
+
+    api_base = _resolve_local_api_base_url(cfg)
+    config_path_abs = str(_config_path(config_path))
+    try:
+        response = httpx.post(
+            f"{api_base}/admin/reload-config",
+            headers=headers,
+            json={"config_path": config_path_abs},
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        if not quiet:
+            console.print(f"Running gateway reload skipped: {exc}")
+        return False
+
+    if response.status_code != 200:
+        if not quiet:
+            console.print(f"Running gateway reload failed: HTTP {response.status_code} {response.text[:300]}")
+        return False
+
+    if not quiet:
+        try:
+            generated_aliases = response.json().get("generated_aliases")
+        except ValueError:
+            generated_aliases = None
+        suffix = f" ({generated_aliases} generated aliases)" if generated_aliases is not None else ""
+        console.print(f"Running gateway reloaded{suffix}.")
+    return True
+
+
 def _print_api_access(config_path: str) -> None:
     cfg = load_gateway_config(config_path=config_path)
     snapshot = _current_inventory_snapshot(config_path, refresh=False)
@@ -1217,6 +1267,7 @@ def _regenerate_master_api_key(restart_service: bool = False) -> str:
 
 def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
     cfg = load_gateway_config(config_path=config_path)
+    _reload_running_gateway(config_path=config_path, cfg=cfg, quiet=True)
     token = _current_master_api_key()
     api_base = _resolve_local_api_base_url(cfg)
     url = f"{api_base}/v1/chat/completions"

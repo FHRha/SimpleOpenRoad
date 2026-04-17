@@ -204,6 +204,41 @@ def test_auth_for_user_and_admin_endpoints(monkeypatch, tmp_path: Path) -> None:
         assert client.get("/keys", headers={"x-admin-key": "admin-key"}).status_code == 200
 
 
+def test_admin_reload_config_refreshes_inventory_providers(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, require_auth=True)
+    monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("MASTER_API_KEY", "master-key")
+    monkeypatch.setenv("ADMIN_API_KEY", "admin-key")
+
+    app = create_app()
+    _patch_adapters(
+        app,
+        SuccessAdapter(provider_name="github", config=_provider_cfg(app, "github")),
+        SuccessAdapter(provider_name="openrouter", config=_provider_cfg(app, "openrouter")),
+    )
+
+    def _fake_provider_registry(cfg):
+        return {
+            "github": SuccessAdapter(provider_name="github", config=cfg.providers["github"]),
+            "openrouter": SuccessAdapter(provider_name="openrouter", config=cfg.providers["openrouter"]),
+        }
+
+    monkeypatch.setattr("app.router.engine.build_provider_registry", _fake_provider_registry)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/reload-config",
+            headers={"x-admin-key": "admin-key"},
+            json={"config_path": str(cfg_path)},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["generated_aliases"] > 0
+    container = app.state.container
+    assert container.inventory_discovery.providers is container.routing_engine.providers
+    assert container.admin_service.current_inventory()["generated_aliases"]
+
+
 def test_openai_models_lists_aliases_and_direct_provider_models(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_config(tmp_path, require_auth=True)
     monkeypatch.setenv("APP_CONFIG_PATH", str(cfg_path))
