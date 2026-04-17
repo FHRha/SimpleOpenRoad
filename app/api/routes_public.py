@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.deps import get_container, require_user_auth
@@ -107,6 +107,28 @@ def _decision_headers(request_id: str, decision: RouterDecision, payload: dict |
     if failed_candidates:
         headers["x-sor-failed-candidates"] = ", ".join(failed_candidates[:10])
     return headers
+
+
+def _gateway_error_payload(exc: GatewayError) -> dict:
+    detail = {
+        "message": exc.message,
+        "type": exc.error_class.value,
+        "provider": exc.provider,
+        "key_id": exc.key_id,
+    }
+    if exc.details:
+        detail["details"] = exc.details
+    return {
+        "error": {
+            "message": exc.message,
+            "type": exc.error_class.value,
+            "code": exc.error_class.value,
+            "provider": exc.provider,
+            "key_id": exc.key_id,
+            "sor_details": exc.details or {},
+        },
+        "detail": detail,
+    }
 
 
 @router.get("/health")
@@ -222,18 +244,7 @@ async def chat_completions(
         result, request_id, decision = await container.gateway_service.chat_completions(request)
         return JSONResponse(content=result, headers=_decision_headers(request_id, decision, result))
     except GatewayError as exc:
-        detail = {
-            "message": exc.message,
-            "type": exc.error_class.value,
-            "provider": exc.provider,
-            "key_id": exc.key_id,
-        }
-        if exc.details:
-            detail["details"] = exc.details
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=detail,
-        ) from exc
+        return JSONResponse(status_code=exc.status_code, content=_gateway_error_payload(exc))
 
 
 @router.post("/v1/responses", dependencies=[Depends(require_user_auth)])
@@ -254,15 +265,4 @@ async def responses(
         result, request_id, decision = await container.gateway_service.responses(request)
         return JSONResponse(content=result, headers=_decision_headers(request_id, decision, result))
     except GatewayError as exc:
-        detail = {
-            "message": exc.message,
-            "type": exc.error_class.value,
-            "provider": exc.provider,
-            "key_id": exc.key_id,
-        }
-        if exc.details:
-            detail["details"] = exc.details
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=detail,
-        ) from exc
+        return JSONResponse(status_code=exc.status_code, content=_gateway_error_payload(exc))

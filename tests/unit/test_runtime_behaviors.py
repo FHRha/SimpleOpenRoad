@@ -12,7 +12,7 @@ from app.core.errors import ErrorClass, GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
 from app.health.checker import HealthChecker
 from app.inventory.discovery import InventoryDiscoveryService
-from app.inventory.models import InventorySnapshot
+from app.inventory.models import GeneratedAlias, GeneratedAliasCandidate, InventorySnapshot
 from app.providers.base import ProviderAdapter
 from app.registry.keys import KeyRegistry
 from app.router.engine import RoutingEngine
@@ -93,6 +93,25 @@ class RateLimitFirstModelAdapter(DummyProviderAdapter):
                 key_id=key.id,
             )
         return await super().chat_completions(request, key)
+
+
+class AlwaysGatewayErrorAdapter(DummyProviderAdapter):
+    def __init__(self, details: dict | None = None, error_class: ErrorClass = ErrorClass.RATE_LIMIT):
+        super().__init__()
+        self.details = details
+        self.error_class = error_class
+        self.requested_models: list[str] = []
+
+    async def chat_completions(self, request: UnifiedLLMRequest, key):  # type: ignore[override]
+        self.requested_models.append(request.model)
+        raise GatewayError(
+            message=self.error_class.value,
+            error_class=self.error_class,
+            status_code=429 if self.error_class == ErrorClass.RATE_LIMIT else 400,
+            provider=self.provider_name,
+            key_id=key.id,
+            details=self.details,
+        )
 
 
 class EmptyChatFirstModelAdapter(DummyProviderAdapter):
@@ -682,3 +701,77 @@ async def test_router_reports_missing_generated_alias_without_provider_model_fal
             "reason": "generated_alias_not_available",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_free_generated_alias_applies_candidate_budget(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    adapter = AlwaysGatewayErrorAdapter(error_class=ErrorClass.UNSUPPORTED_MODEL)
+    engine.providers = {"p1": adapter}
+    engine.inventory_discovery.refresh_providers(engine.providers)
+    engine.inventory_discovery.cache.set(
+        InventorySnapshot(
+            refreshed_at="2026-04-17T00:00:00+00:00",
+            generated_aliases=[
+                GeneratedAlias(
+                    alias_id="auto/free",
+                    scope="compat",
+                    modality="text",
+                    category="free",
+                    candidates=[
+                        GeneratedAliasCandidate(provider="p1", model_id=f"m{index}")
+                        for index in range(1, 6)
+                    ],
+                )
+            ],
+        )
+    )
+
+    request = UnifiedLLMRequest(model="auto/free", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="auto/free", stream=False)
+
+    with pytest.raises(GatewayError) as exc_info:
+        await engine.route_chat_completion(request, context)
+
+    assert adapter.requested_models == ["m1", "m2", "m3"]
+    assert exc_info.value.details["free_alias"]["free_only"] is True
+    assert exc_info.value.details["free_alias"]["candidate_count_before_budget"] == 5
+    assert exc_info.value.details["free_alias"]["candidate_count_after_budget"] == 3
+    assert [attempt["model"] for attempt in exc_info.value.details["attempts"]] == ["m1", "m2", "m3"]
+
+
+@pytest.mark.asyncio
+async def test_free_generated_alias_stops_on_provider_free_tier_limit(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    adapter = AlwaysGatewayErrorAdapter(details={"rate_limit_scope": "provider_free_tier"})
+    engine.providers = {"p1": adapter}
+    engine.inventory_discovery.refresh_providers(engine.providers)
+    engine.inventory_discovery.cache.set(
+        InventorySnapshot(
+            refreshed_at="2026-04-17T00:00:00+00:00",
+            generated_aliases=[
+                GeneratedAlias(
+                    alias_id="auto/free",
+                    scope="compat",
+                    modality="text",
+                    category="free",
+                    candidates=[
+                        GeneratedAliasCandidate(provider="p1", model_id=f"m{index}")
+                        for index in range(1, 6)
+                    ],
+                )
+            ],
+        )
+    )
+
+    request = UnifiedLLMRequest(model="auto/free", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="auto/free", stream=False)
+
+    with pytest.raises(GatewayError) as exc_info:
+        await engine.route_chat_completion(request, context)
+
+    assert adapter.requested_models == ["m1"]
+    assert exc_info.value.status_code == 429
+    assert "paid fallback was not used" in exc_info.value.message
+    assert exc_info.value.details["rate_limit_scope"] == "provider_free_tier"
+    assert len(exc_info.value.details["attempts"]) == 1

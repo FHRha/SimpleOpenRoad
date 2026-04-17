@@ -489,6 +489,31 @@ def _select_test_alias(config_path: str) -> str | None:
     return alias_options[selected - 1]
 
 
+def _select_api_test_mode() -> str | None:
+    modes = [
+        ("simple", "simple chat", "fast non-streaming hello check"),
+        ("stream", "streaming chat", "checks SSE streaming path"),
+        ("tools", "tools request", "checks tool-capable OpenAI-compatible payload"),
+        ("cline", "Cline-like", "streaming request with tools and Cline-style fields"),
+    ]
+    table = Table(title="Select Automatic API Test Mode", box=box.ASCII)
+    table.add_column("#")
+    table.add_column("Mode")
+    table.add_column("Checks")
+    for index, (_, label, description) in enumerate(modes, start=1):
+        table.add_row(str(index), label, description)
+    table.add_row("0", "Back", "cancel automatic test")
+    console.print(table)
+
+    choice = _prompt_menu_choice(prompt="Test mode", default="1")
+    if choice == "0":
+        return None
+    selected = int(choice)
+    if selected < 1 or selected > len(modes):
+        raise typer.BadParameter(f"Choose a number between 1 and {len(modes)}, or 0")
+    return modes[selected - 1][0]
+
+
 def _print_generated_aliases_table(snapshot: dict[str, Any] | None) -> None:
     table = Table(title="Generated Aliases", box=box.ASCII)
     table.add_column("Alias")
@@ -819,6 +844,28 @@ def _extract_candidate_diagnostics(response: httpx.Response) -> list[dict]:
     return [item for item in candidates if isinstance(item, dict)]
 
 
+def _generated_alias_category(snapshot: dict[str, Any] | None, alias_id: str | None) -> str | None:
+    if not alias_id or not isinstance(snapshot, dict):
+        return None
+    raw_aliases = snapshot.get("generated_aliases", [])
+    if not isinstance(raw_aliases, list):
+        return None
+    for item in raw_aliases:
+        if isinstance(item, dict) and item.get("alias_id") == alias_id:
+            return str(item.get("category") or "")
+    return None
+
+
+def _is_free_alias_id(snapshot: dict[str, Any] | None, alias_id: str | None) -> bool:
+    if not alias_id:
+        return False
+    return (
+        alias_id in {"auto/free", "auto/text/free"}
+        or alias_id.endswith("/text/free")
+        or _generated_alias_category(snapshot, alias_id) == "free"
+    )
+
+
 def _print_route_preview(config_path: str, model: str | None = None) -> None:
     cfg = load_gateway_config(config_path=config_path)
     snapshot = _current_inventory_snapshot(config_path, refresh=True)
@@ -914,6 +961,14 @@ def _print_route_preview(config_path: str, model: str | None = None) -> None:
         summary.add_row("Remembered model", f"{route_memory.get('provider')}/{route_memory.get('model')}")
     if context_skipped:
         summary.add_row("Context filtered", str(len(context_skipped)))
+    if _is_free_alias_id(snapshot, alias):
+        summary.add_row("Free-only", "yes")
+        summary.add_row("Paid fallback", "disabled")
+        summary.add_row("Max free attempts", str(cfg.routing.free_alias.max_candidates_per_request))
+        summary.add_row(
+            "Stop on free-tier 429",
+            "yes" if cfg.routing.free_alias.stop_on_provider_free_tier_rate_limit else "no",
+        )
     summary.add_row("Planned candidates", str(len(planned)))
     console.print(summary)
     _print_request_analysis(analysis)
@@ -1270,16 +1325,89 @@ def _regenerate_master_api_key(restart_service: bool = False) -> str:
     return new_token
 
 
-def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
+def _api_test_payload(model: str, mode: str) -> dict:
+    if mode == "cline":
+        return {
+            "model": model,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": "You are a concise coding assistant."},
+                {"role": "user", "content": "Reply with a short greeting."},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "description": "No operation test tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+            "stream_options": {"include_usage": True},
+        }
+    if mode == "tools":
+        return {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with a short greeting."}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "noop",
+                        "description": "No operation test tool.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+        }
+    if mode == "stream":
+        return {
+            "model": model,
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def _extract_stream_preview(text: str) -> str:
+    fragments: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line.removeprefix("data:").strip()
+        if not payload or payload == "[DONE]":
+            continue
+        try:
+            data = json.loads(payload)
+        except ValueError:
+            continue
+        choices = data.get("choices", []) if isinstance(data, dict) else []
+        if not choices:
+            continue
+        delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else {}
+        content = delta.get("content") if isinstance(delta, dict) else None
+        if content:
+            fragments.append(str(content))
+    return "".join(fragments).strip()
+
+
+def _test_api_request(config_path: str, model: str = "auto/fast", mode: str = "simple") -> None:
     cfg = load_gateway_config(config_path=config_path)
     _reload_running_gateway(config_path=config_path, cfg=cfg, quiet=True)
     token = _current_master_api_key()
     api_base = _resolve_local_api_base_url(cfg)
     url = f"{api_base}/v1/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": "hello"}],
-    }
+    payload = _api_test_payload(model, mode)
     analysis = analyze_request_route(
         UnifiedLLMRequest(model=model, messages=[ChatMessage(role="user", content="hello")])
     )
@@ -1292,6 +1420,7 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
     table.add_column("Value")
     table.add_row("URL", url)
     table.add_row("Model", model)
+    table.add_row("Mode", mode)
     table.add_row("Auth", "x-api-key" if cfg.security.require_master_key else "disabled")
     table.add_row("Intent", analysis.intent)
     table.add_row("Profile", analysis.profile)
@@ -1301,11 +1430,15 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
         response = httpx.post(url, headers=headers, json=payload, timeout=60.0)
         table.add_row("HTTP status", str(response.status_code))
         if response.status_code == 200:
-            data = response.json()
             text = ""
-            choices = data.get("choices", []) if isinstance(data, dict) else []
-            if choices:
-                text = str(choices[0].get("message", {}).get("content", ""))
+            if payload.get("stream"):
+                text = _extract_stream_preview(response.text)
+                data = {}
+            else:
+                data = response.json()
+                choices = data.get("choices", []) if isinstance(data, dict) else []
+                if choices:
+                    text = str(choices[0].get("message", {}).get("content", ""))
             table.add_row("Result", "ok")
             selected_model = response.headers.get("x-sor-selected-model") or (
                 str(data.get("model", "")) if isinstance(data, dict) else ""
@@ -1326,6 +1459,15 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
             if detail.get("provider") or detail.get("key_id"):
                 table.add_row("Provider", str(detail.get("provider") or "<none>"))
                 table.add_row("Key ID", str(detail.get("key_id") or "<none>"))
+            details = detail.get("details")
+            free_alias = details.get("free_alias") if isinstance(details, dict) else None
+            if isinstance(free_alias, dict) and free_alias.get("free_only"):
+                table.add_row("Free-only", "yes")
+                table.add_row("Paid fallback", str(free_alias.get("paid_fallback") or "disabled"))
+                if free_alias.get("max_candidates_per_request") is not None:
+                    table.add_row("Max free attempts", str(free_alias.get("max_candidates_per_request")))
+                if details.get("rate_limit_scope") == "provider_free_tier":
+                    table.add_row("Reason", "provider free-tier rate limit")
             candidates = _extract_candidate_diagnostics(response)
             failed_candidates = ", ".join(
                 f"{item.get('provider')}/{item.get('model')}"
@@ -1346,6 +1488,16 @@ def _test_api_request(config_path: str, model: str = "auto/fast") -> None:
         _print_route_analysis_dict(_extract_route_analysis(response))
         _print_route_memory_dict(_extract_route_memory(response))
         _print_candidate_diagnostics(_extract_candidate_diagnostics(response))
+
+
+def _run_interactive_api_test(config_path: str) -> None:
+    selected_model = _select_test_alias(config_path)
+    if selected_model is None:
+        return
+    mode = _select_api_test_mode()
+    if mode is None:
+        return
+    _test_api_request(config_path=config_path, model=selected_model, mode=mode)
 
 
 def _generate_api_key(length: int = 40) -> str:
@@ -3889,10 +4041,8 @@ def _run_api_access_panel(config_path: str) -> None:
                 _regenerate_master_api_key(restart_service=restart_now)
                 _pause()
             elif choice == "3":
-                selected_model = _select_test_alias(config_path)
-                if selected_model is not None:
-                    _test_api_request(config_path=config_path, model=selected_model)
-                    _pause()
+                _run_interactive_api_test(config_path=config_path)
+                _pause()
             elif choice == "4":
                 _print_openai_client_examples(config_path=config_path)
                 _pause()
@@ -3929,10 +4079,8 @@ def _run_quick_setup_panel(config_path: str) -> None:
                 _run_setup_wizard(config_path=config_path)
                 _pause()
             elif choice == "3":
-                selected_model = _select_test_alias(config_path)
-                if selected_model is not None:
-                    _test_api_request(config_path=config_path, model=selected_model)
-                    _pause()
+                _run_interactive_api_test(config_path=config_path)
+                _pause()
             elif choice == "4":
                 _print_quick_status(config_path=config_path)
                 _pause()
@@ -4010,10 +4158,8 @@ def _run_routing_models_panel(config_path: str) -> None:
             elif choice == "4":
                 _run_capabilities_panel(config_path=config_path)
             elif choice == "5":
-                selected_model = _select_test_alias(config_path)
-                if selected_model is not None:
-                    _test_api_request(config_path=config_path, model=selected_model)
-                    _pause()
+                _run_interactive_api_test(config_path=config_path)
+                _pause()
             elif choice == "0":
                 return
             else:
@@ -4046,10 +4192,8 @@ def _run_diagnostics_panel(config_path: str) -> None:
                 doctor(config_path=config_path)
                 _pause()
             elif choice == "2":
-                selected_model = _select_test_alias(config_path)
-                if selected_model is not None:
-                    _test_api_request(config_path=config_path, model=selected_model)
-                    _pause()
+                _run_interactive_api_test(config_path=config_path)
+                _pause()
             elif choice == "3":
                 _run_route_preview_panel(config_path=config_path)
             elif choice == "4":

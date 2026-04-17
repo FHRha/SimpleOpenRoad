@@ -19,6 +19,8 @@ config/*.local.yaml
 config/*.user.yaml
 config/*.bak
 .pytest_cache/
+.pytest-*/
+pytest-cache-files-*/
 .tmp-pytest/
 pytest_tmp/
 .ruff_cache/

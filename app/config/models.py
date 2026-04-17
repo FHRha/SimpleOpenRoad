@@ -54,10 +54,16 @@ class ErrorPolicyConfig(BaseModel):
     unsupported_model: str = "switch_provider"
 
 
+class FreeAliasRoutingConfig(BaseModel):
+    max_candidates_per_request: int = 3
+    stop_on_provider_free_tier_rate_limit: bool = True
+
+
 class RoutingConfig(BaseModel):
     default_strategy: str = ROUTE_STRICT_PRIORITY
     retry: RetryConfig = Field(default_factory=RetryConfig)
     error_policy: ErrorPolicyConfig = Field(default_factory=ErrorPolicyConfig)
+    free_alias: FreeAliasRoutingConfig = Field(default_factory=FreeAliasRoutingConfig)
 
 
 class ModelCapabilitiesConfig(BaseModel):

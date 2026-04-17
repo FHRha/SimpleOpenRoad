@@ -148,6 +148,91 @@ class RoutingEngine:
             "reasons": analysis.reasons,
         }
 
+    @staticmethod
+    def _generated_alias_by_id(generated_aliases: list[GeneratedAlias], alias_id: str | None) -> GeneratedAlias | None:
+        if not alias_id:
+            return None
+        return next((alias for alias in generated_aliases if alias.alias_id == alias_id), None)
+
+    @staticmethod
+    def _is_free_alias(resolved_alias: str | None, generated_aliases: list[GeneratedAlias]) -> bool:
+        if not resolved_alias:
+            return False
+        if resolved_alias in {"auto/free", "auto/text/free"} or resolved_alias.endswith("/text/free"):
+            return True
+        alias = RoutingEngine._generated_alias_by_id(generated_aliases, resolved_alias)
+        return bool(alias and alias.category == "free")
+
+    @staticmethod
+    def _apply_free_alias_budget(
+        config,
+        candidates: list[RouteCandidate],
+        resolved_alias: str | None,
+        generated_aliases: list[GeneratedAlias],
+    ) -> tuple[list[RouteCandidate], dict]:
+        if not RoutingEngine._is_free_alias(resolved_alias, generated_aliases):
+            return candidates, {"free_only": False, "route_alias": resolved_alias}
+        limit = max(1, config.routing.free_alias.max_candidates_per_request)
+        capped_candidates = candidates[:limit]
+        return capped_candidates, {
+            "free_only": True,
+            "route_alias": resolved_alias,
+            "paid_fallback": "disabled",
+            "max_candidates_per_request": limit,
+            "candidate_count_before_budget": len(candidates),
+            "candidate_count_after_budget": len(capped_candidates),
+        }
+
+    @staticmethod
+    def _attempts_detail(decision: RouterDecision) -> list[dict]:
+        attempts: list[dict] = []
+        for attempt in decision.attempts:
+            item = {
+                "attempt": attempt.attempt_index,
+                "provider": attempt.provider,
+                "key_id": attempt.key_id,
+                "model": attempt.model,
+                "success": attempt.success,
+                "latency_ms": attempt.latency_ms,
+            }
+            if attempt.error_class is not None:
+                item["error_class"] = attempt.error_class.value
+            if attempt.error_message:
+                item["error_message"] = attempt.error_message
+            attempts.append(item)
+        return attempts
+
+    @staticmethod
+    def _is_provider_free_tier_rate_limit(error: GatewayError) -> bool:
+        return (
+            error.error_class == ErrorClass.RATE_LIMIT
+            and isinstance(error.details, dict)
+            and error.details.get("rate_limit_scope") == "provider_free_tier"
+        )
+
+    def _with_route_error_details(
+        self,
+        error: GatewayError,
+        request: UnifiedLLMRequest,
+        route_memory_detail: dict,
+        candidate_details: list[dict],
+        decision: RouterDecision,
+        free_alias_detail: dict,
+    ) -> GatewayError:
+        details = dict(error.details or {})
+        details.update(
+            {
+                "analysis": self._analysis_detail(request),
+                "route_memory": route_memory_detail,
+                "candidates": candidate_details,
+                "attempts": self._attempts_detail(decision),
+                "route_alias": decision.resolved_alias,
+                "free_alias": free_alias_detail,
+            }
+        )
+        error.details = details
+        return error
+
     def _prioritize_remembered_candidate(
         self,
         *,
@@ -315,6 +400,12 @@ class RoutingEngine:
             profile=route_profile,
             context_bucket=context_bucket,
         )
+        candidates, free_alias_detail = self._apply_free_alias_budget(
+            config,
+            candidates,
+            resolved_alias,
+            generated_aliases,
+        )
         selection_strategy = config.routing.default_strategy
         if resolved_alias and resolved_alias in config.routes.aliases:
             selection_strategy = config.routes.aliases[resolved_alias].strategy
@@ -330,6 +421,7 @@ class RoutingEngine:
         final_error: GatewayError | None = None
         attempt_index = 0
         candidate_details: list[dict] = list(context_skipped_details)
+        stop_routing_now = False
 
         for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
@@ -486,6 +578,26 @@ class RoutingEngine:
                                 },
                             )
 
+                        if (
+                            free_alias_detail.get("free_only")
+                            and config.routing.free_alias.stop_on_provider_free_tier_rate_limit
+                            and self._is_provider_free_tier_rate_limit(gateway_error)
+                        ):
+                            final_error = GatewayError(
+                                message=(
+                                    f"{gateway_error.message} "
+                                    "The selected free alias is strict free-only; paid fallback was not used."
+                                ),
+                                error_class=ErrorClass.RATE_LIMIT,
+                                status_code=429,
+                                provider=gateway_error.provider,
+                                key_id=gateway_error.key_id,
+                                details=gateway_error.details,
+                            )
+                            self.key_registry.bump_switch(key.id)
+                            stop_routing_now = True
+                            break
+
                         if error_class == ErrorClass.RATE_LIMIT and candidate_index < len(candidates) - 1:
                             self.key_registry.bump_switch(key.id)
                             break
@@ -502,11 +614,21 @@ class RoutingEngine:
                         self.key_registry.bump_switch(key.id)
                         break
 
-                if switch_provider_now:
+                if switch_provider_now or stop_routing_now:
                     break
 
+            if stop_routing_now:
+                break
+
         if final_error is not None:
-            raise final_error
+            raise self._with_route_error_details(
+                final_error,
+                request,
+                route_memory_detail,
+                candidate_details,
+                decision,
+                free_alias_detail,
+            )
 
         cooldown_error = self._cooldown_error(config, candidates, runtime_states)
         if cooldown_error is not None:
@@ -540,6 +662,8 @@ class RoutingEngine:
                 "analysis": self._analysis_detail(request),
                 "route_memory": route_memory_detail,
                 "candidates": candidate_details,
+                "attempts": self._attempts_detail(decision),
+                "free_alias": free_alias_detail,
             },
         )
 
@@ -565,6 +689,12 @@ class RoutingEngine:
             profile=route_profile,
             context_bucket=context_bucket,
         )
+        candidates, free_alias_detail = self._apply_free_alias_budget(
+            config,
+            candidates,
+            resolved_alias,
+            generated_aliases,
+        )
         selection_strategy = config.routing.default_strategy
         if resolved_alias and resolved_alias in config.routes.aliases:
             selection_strategy = config.routes.aliases[resolved_alias].strategy
@@ -580,6 +710,7 @@ class RoutingEngine:
         final_error: GatewayError | None = None
         attempt_index = 0
         candidate_details: list[dict] = list(context_skipped_details)
+        stop_routing_now = False
 
         for candidate_index, candidate in enumerate(candidates):
             adapter = self.providers.get(candidate.provider)
@@ -790,6 +921,25 @@ class RoutingEngine:
                                     "error_class": error_class.value,
                                 },
                             )
+                        if (
+                            free_alias_detail.get("free_only")
+                            and config.routing.free_alias.stop_on_provider_free_tier_rate_limit
+                            and self._is_provider_free_tier_rate_limit(gateway_error)
+                        ):
+                            final_error = GatewayError(
+                                message=(
+                                    f"{gateway_error.message} "
+                                    "The selected free alias is strict free-only; paid fallback was not used."
+                                ),
+                                error_class=ErrorClass.RATE_LIMIT,
+                                status_code=429,
+                                provider=gateway_error.provider,
+                                key_id=gateway_error.key_id,
+                                details=gateway_error.details,
+                            )
+                            self.key_registry.bump_switch(key.id)
+                            stop_routing_now = True
+                            break
                         if error_class == ErrorClass.RATE_LIMIT and candidate_index < len(candidates) - 1:
                             self.key_registry.bump_switch(key.id)
                             break
@@ -804,11 +954,21 @@ class RoutingEngine:
                         self.key_registry.bump_switch(key.id)
                         break
 
-                if switch_provider_now:
+                if switch_provider_now or stop_routing_now:
                     break
 
+            if stop_routing_now:
+                break
+
         if final_error is not None:
-            raise final_error
+            raise self._with_route_error_details(
+                final_error,
+                request,
+                route_memory_detail,
+                candidate_details,
+                decision,
+                free_alias_detail,
+            )
         cooldown_error = self._cooldown_error(config, candidates, runtime_states)
         if cooldown_error is not None:
             raise cooldown_error
@@ -839,6 +999,8 @@ class RoutingEngine:
                 "analysis": self._analysis_detail(request),
                 "route_memory": route_memory_detail,
                 "candidates": candidate_details,
+                "attempts": self._attempts_detail(decision),
+                "free_alias": free_alias_detail,
             },
         )
 

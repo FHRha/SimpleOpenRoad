@@ -153,3 +153,25 @@ async def test_openai_compatible_keeps_permission_403_as_auth_forbidden() -> Non
         )
 
     assert exc_info.value.error_class == ErrorClass.AUTH_FORBIDDEN
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_marks_openrouter_free_429_scope() -> None:
+    respx.post("https://openrouter.example/api/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            429,
+            json={"error": {"message": "Free model requests per day exceeded", "code": 429}},
+            headers={"Retry-After": "60"},
+        )
+    )
+
+    with pytest.raises(GatewayError) as exc_info:
+        await _adapter_with_v1_endpoint().chat_completions(
+            UnifiedLLMRequest(model="openrouter/free", messages=[ChatMessage(role="user", content="hello")]),
+            KeyConfig(id="openrouter-main", key="secret"),
+        )
+
+    assert exc_info.value.error_class == ErrorClass.RATE_LIMIT
+    assert exc_info.value.details["rate_limit_scope"] == "provider_free_tier"
+    assert exc_info.value.details["upstream_headers"]["retry-after"] == "60"

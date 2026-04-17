@@ -13,6 +13,14 @@ from app.core.types import UnifiedLLMRequest
 from app.providers.base import ProviderAdapter
 
 
+ERROR_HEADER_ALLOWLIST = {
+    "retry-after",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+}
+
+
 class OpenAICompatibleAdapter(ProviderAdapter):
     chat_completions_path = "/v1/chat/completions"
     responses_path = "/v1/responses"
@@ -78,6 +86,48 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             return ErrorClass.PROVIDER_UNAVAILABLE
         return ErrorClass.UNKNOWN
 
+    @staticmethod
+    def _selected_error_headers(headers: httpx.Headers) -> dict[str, str]:
+        return {
+            name: value
+            for name, value in headers.items()
+            if name.lower() in ERROR_HEADER_ALLOWLIST
+        }
+
+    def _rate_limit_scope(self, status_code: int, body: str, payload: dict[str, Any] | None = None) -> str | None:
+        if status_code != 429:
+            return None
+        body_lower = body.lower()
+        model = str((payload or {}).get("model", "")).lower()
+        if self.provider_name == "openrouter" and (
+            model == "openrouter/free"
+            or model.endswith(":free")
+            or "free tier" in body_lower
+            or "free model" in body_lower
+            or "requests per day" in body_lower
+            or "requests per minute" in body_lower
+        ):
+            return "provider_free_tier"
+        return "unknown"
+
+    def _error_details(
+        self,
+        response: httpx.Response,
+        body: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "upstream_status": response.status_code,
+            "upstream_body": body,
+        }
+        headers = self._selected_error_headers(response.headers)
+        if headers:
+            details["upstream_headers"] = headers
+        rate_limit_scope = self._rate_limit_scope(response.status_code, body, payload)
+        if rate_limit_scope:
+            details["rate_limit_scope"] = rate_limit_scope
+        return details
+
     async def _post(self, path: str, payload: dict[str, Any], key: KeyConfig) -> dict:
         timeout = httpx.Timeout(timeout=self.config.timeout_seconds)
         try:
@@ -113,6 +163,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 status_code=response.status_code,
                 provider=self.provider_name,
                 key_id=key.id,
+                details=self._error_details(response, body, payload),
             )
 
         try:
@@ -159,6 +210,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                                 status_code=response.status_code,
                                 provider=self.provider_name,
                                 key_id=key.id,
+                                details=self._error_details(response, body, payload),
                             )
                         event_lines: list[str] = []
                         async for line in response.aiter_lines():
@@ -248,6 +300,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 status_code=response.status_code,
                 provider=self.provider_name,
                 key_id=key.id,
+                details=self._error_details(response, body),
             )
 
         try:

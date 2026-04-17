@@ -728,7 +728,9 @@ def test_cli_gateway_access_automatic_test_prompts_for_alias(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(
         "app.cli.app._test_api_request",
-        lambda config_path, model="auto/fast": called.update({"config_path": config_path, "model": model}),
+        lambda config_path, model="auto/fast", mode="simple": called.update(
+            {"config_path": config_path, "model": model, "mode": mode}
+        ),
     )
 
     result = runner.invoke(
@@ -740,6 +742,7 @@ def test_cli_gateway_access_automatic_test_prompts_for_alias(monkeypatch, tmp_pa
     assert result.exit_code == 0
     assert called["config_path"] == str(config_path)
     assert called["model"] == "auto/general"
+    assert called["mode"] == "simple"
     assert "Select Alias for Automatic API Test" in result.stdout
 
 
@@ -1061,7 +1064,7 @@ def test_cli_api_test_prints_candidate_diagnostics(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr("app.cli.app.httpx.post", _fake_post)
 
-    result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="3\n3\n\n0\n0\n")
+    result = runner.invoke(cli_app, ["panel", "--config-path", str(config_path)], input="3\n3\n\n1\n\n0\n0\n")
 
     assert result.exit_code == 0
     assert "Request Route Analysis" in result.stdout

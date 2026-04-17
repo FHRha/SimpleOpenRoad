@@ -24,6 +24,9 @@ routing:
     network_timeout: retry_then_switch_key
     malformed_response: switch_provider
     unsupported_model: switch_provider
+  free_alias:
+    max_candidates_per_request: 3
+    stop_on_provider_free_tier_rate_limit: true
 
 model_capabilities:
   tool_capable:
