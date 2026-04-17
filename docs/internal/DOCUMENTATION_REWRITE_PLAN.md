@@ -19,6 +19,7 @@ Primary user docs:
 - `docs/CLIENTS.md` - OpenAI-compatible client settings, Cline-like agents, curl and streaming examples.
 - `docs/DEPLOYMENT.md` - production install, service, reverse proxy, backups, updates.
 - `docs/PROVIDERS.md` - provider support matrix and provider-specific notes.
+- `docs/internal/PROVIDER_ROADMAP.md` - future provider expansion and provider-picker UX.
 - `docs/ROUTING.md` - aliases, direct model routing, adaptive routing, route memory, free routes, model quarantine.
 - `docs/CONFIG_REFERENCE.md` - current YAML/env reference.
 - `docs/ADMIN_GUIDE.md` - operator commands and terminal panel.
@@ -64,3 +65,4 @@ Internal/historical docs:
 - Move historical implementation notes into `docs/internal/`.
 - Add `CLIENTS.md` for OpenAI-compatible client setup.
 - Add `DEPLOYMENT.md` for server operations.
+- Add `docs/internal/PROVIDER_ROADMAP.md` for provider expansion planning.

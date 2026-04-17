@@ -19,6 +19,7 @@ These files are useful for maintainers, but they are not the primary user docume
 | `ADAPTIVE_ROUTING_ARCHITECTURE.md` | Detailed adaptive routing design notes. |
 | `MODEL_INVENTORY_ARCHITECTURE.md` | Detailed inventory and alias-generation design notes. |
 | `PROVIDER_EXPANSION_PLAN.md` | Provider expansion planning notes. |
+| `PROVIDER_ROADMAP.md` | Future provider expansion groups and provider-picker UX plan. |
 | `PROVIDER_MODEL_NOTES.md` | Working notes about provider catalogs and model classification. |
 | `GITHUB_DEGRADED_TRIAGE.md` | GitHub Models triage notes. |
 | `CLINE_FREE_ROUTING_FIX_PLAN.md` | Historical Cline/free-routing fix plan. |
