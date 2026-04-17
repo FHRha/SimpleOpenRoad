@@ -473,6 +473,43 @@ async def test_rate_limited_cooldown_returns_429_instead_of_generic_503(tmp_path
     assert exc_info.value.status_code == 429
     assert exc_info.value.error_class == ErrorClass.RATE_LIMIT
     assert "cooling down" in exc_info.value.message.lower()
+    assert exc_info.value.details["route_alias"] == "auto/fast"
+    assert exc_info.value.details["retry_after_seconds"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_free_alias_cooldown_error_is_explicit_and_keeps_provider_details(tmp_path: Path) -> None:
+    engine, key_registry, _ = _build_engine(tmp_path)
+    engine.inventory_discovery.cache.set(
+        InventorySnapshot(
+            refreshed_at="2026-04-17T00:00:00+00:00",
+            generated_aliases=[
+                GeneratedAlias(
+                    alias_id="auto/free",
+                    scope="compat",
+                    modality="text",
+                    category="free",
+                    candidates=[GeneratedAliasCandidate(provider="p1", model_id="m1")],
+                )
+            ],
+        )
+    )
+    for key in engine.runtime_config.get().providers["p1"].keys:
+        key_registry.record_failure(key=key, error_class=ErrorClass.RATE_LIMIT, error_message="rate limited")
+
+    request = UnifiedLLMRequest(model="auto/free", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="auto/free", stream=False)
+
+    with pytest.raises(GatewayError) as exc_info:
+        await engine.route_chat_completion(request, context)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.provider == "p1"
+    assert "free-only route is cooling down" in exc_info.value.message.lower()
+    assert "no paid fallback was used" in exc_info.value.message.lower()
+    assert exc_info.value.details["route_alias"] == "auto/free"
+    assert exc_info.value.details["cooldown_provider"] == "p1"
+    assert exc_info.value.details["free_alias"]["free_only"] is True
 
 
 @pytest.mark.asyncio

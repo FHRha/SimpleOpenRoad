@@ -300,6 +300,9 @@ class RoutingEngine:
         config,
         candidates,
         runtime_states: dict[str, dict],
+        *,
+        resolved_alias: str | None = None,
+        free_alias_detail: dict | None = None,
     ) -> GatewayError | None:
         candidate_providers = {candidate.provider for candidate in candidates}
         if not candidate_providers:
@@ -343,14 +346,26 @@ class RoutingEngine:
                     any_rate_limited = True
 
         if any_rate_limited:
-            details = {"retry_after_seconds": retry_after_seconds} if retry_after_seconds is not None else None
-            message = "All configured keys are cooling down after rate limit. Retry shortly."
+            details = {"retry_after_seconds": retry_after_seconds} if retry_after_seconds is not None else {}
+            provider_name = next(iter(candidate_providers)) if len(candidate_providers) == 1 else None
+            if provider_name is not None:
+                details["cooldown_provider"] = provider_name
+            if resolved_alias:
+                details["route_alias"] = resolved_alias
+            if free_alias_detail:
+                details["free_alias"] = free_alias_detail
+
+            if free_alias_detail and free_alias_detail.get("free_only"):
+                message = "Free-only route is cooling down after rate limit. No paid fallback was used."
+            else:
+                message = "All configured keys are cooling down after rate limit. Retry shortly."
             if retry_after_seconds is not None:
                 message = f"{message} Retry after about {retry_after_seconds}s."
             return GatewayError(
                 message=message,
                 error_class=ErrorClass.RATE_LIMIT,
                 status_code=429,
+                provider=provider_name,
                 details=details,
             )
 
@@ -630,9 +645,22 @@ class RoutingEngine:
                 free_alias_detail,
             )
 
-        cooldown_error = self._cooldown_error(config, candidates, runtime_states)
+        cooldown_error = self._cooldown_error(
+            config,
+            candidates,
+            runtime_states,
+            resolved_alias=resolved_alias,
+            free_alias_detail=free_alias_detail,
+        )
         if cooldown_error is not None:
-            raise cooldown_error
+            raise self._with_route_error_details(
+                cooldown_error,
+                request,
+                route_memory_detail,
+                candidate_details,
+                decision,
+                free_alias_detail,
+            )
 
         if not candidate_details and looks_like_generated_alias(config, request.model):
             candidate_details.append(
@@ -969,9 +997,22 @@ class RoutingEngine:
                 decision,
                 free_alias_detail,
             )
-        cooldown_error = self._cooldown_error(config, candidates, runtime_states)
+        cooldown_error = self._cooldown_error(
+            config,
+            candidates,
+            runtime_states,
+            resolved_alias=resolved_alias,
+            free_alias_detail=free_alias_detail,
+        )
         if cooldown_error is not None:
-            raise cooldown_error
+            raise self._with_route_error_details(
+                cooldown_error,
+                request,
+                route_memory_detail,
+                candidate_details,
+                decision,
+                free_alias_detail,
+            )
         if not candidate_details and looks_like_generated_alias(config, request.model):
             candidate_details.append(
                 {
