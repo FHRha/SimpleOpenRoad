@@ -152,6 +152,52 @@ async def test_inventory_discovery_merges_models_across_keys() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inventory_discovery_uses_metadata_to_exclude_non_text_together_models() -> None:
+    config = GatewayConfig(
+        storage={"sqlite_path": "data/test_inventory.db"},
+        providers={
+            "together": ProviderConfig(
+                endpoint="https://api.together.xyz/v1",
+                priority=10,
+                keys=[KeyConfig(id="together-main", key="secret-1")],
+            )
+        },
+    )
+    runtime_config = RuntimeConfig(config=config, env=EnvSettings())
+    together_cfg = runtime_config.get().providers["together"]
+    service = InventoryDiscoveryService(
+        runtime_config=runtime_config,
+        providers={
+            "together": MetadataAdapter(
+                provider_name="together",
+                config=together_cfg,
+                records=[
+                    {"id": "mistralai/Devstral-Small-2505", "type": "chat"},
+                    {"id": "minimax/speech-2.6-turbo", "type": "audio"},
+                    {"id": "ByteDance/Seedance-1.0-lite", "type": "video"},
+                ],
+            )
+        },
+    )
+
+    snapshot = await service.refresh()
+
+    models = {item.model_id: item for item in snapshot.models}
+    assert models["mistralai/Devstral-Small-2505"].modality == "text"
+    assert models["minimax/speech-2.6-turbo"].modality == "audio"
+    assert models["minimax/speech-2.6-turbo"].is_text_candidate is False
+    assert models["ByteDance/Seedance-1.0-lite"].modality == "video"
+    assert models["ByteDance/Seedance-1.0-lite"].is_text_candidate is False
+
+    alias_map = {item.alias_id: item for item in snapshot.generated_aliases}
+    free_cheap = alias_map["together/text/free-cheap"]
+    candidate_ids = [item.model_id for item in free_cheap.candidates]
+    assert "mistralai/Devstral-Small-2505" in candidate_ids
+    assert "minimax/speech-2.6-turbo" not in candidate_ids
+    assert "ByteDance/Seedance-1.0-lite" not in candidate_ids
+
+
+@pytest.mark.asyncio
 async def test_inventory_discovery_records_auth_failure_per_key() -> None:
     runtime_config = _runtime_config()
     gemini_cfg = runtime_config.get().providers["gemini"]

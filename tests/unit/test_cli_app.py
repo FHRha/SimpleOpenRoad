@@ -2038,3 +2038,35 @@ def test_interactive_add_provider_key_reprompts_duplicate_id(monkeypatch, tmp_pa
     openrouter_ids = [item["id"] for item in data["providers"]["openrouter"]["keys"]]
     assert "openrouter-extra" in openrouter_ids
     assert "github-main" not in openrouter_ids
+
+
+def test_interactive_add_provider_key_persists_cloudflare_account_id_before_keys_add(
+    monkeypatch, tmp_path: Path
+) -> None:
+    config_path = _write_config(tmp_path)
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["providers"]["cloudflare"] = {
+        "enabled": True,
+        "priority": 29,
+        "endpoint": "https://api.cloudflare.com/client/v4",
+        "account_id": "",
+        "keys": [],
+    }
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    prompts = iter(["1", "acc-123", "cloudflare-main", "secret-value", "100"])
+
+    monkeypatch.setattr("app.cli.app._print_provider_choices", lambda provider_names: ["cloudflare"])
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr("app.cli.app.typer.confirm", lambda *args, **kwargs: False)
+
+    observed: dict[str, str] = {}
+
+    def _fake_keys_add(provider: str, key_id: str, secret: str, priority: int, config_path: str, validate: bool) -> None:
+        data = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
+        observed["account_id"] = str(data["providers"]["cloudflare"]["account_id"])
+
+    monkeypatch.setattr("app.cli.app.keys_add", _fake_keys_add)
+
+    _interactive_add_provider_key(str(config_path))
+
+    assert observed["account_id"] == "acc-123"

@@ -8,15 +8,19 @@ from app.inventory.models import DiscoveredModel, Modality
 from app.inventory.special_routes import is_special_route
 
 
-def guess_modality(model_id: str) -> Modality:
+def guess_modality(model_id: str, raw_metadata: dict[str, Any] | None = None) -> Modality:
+    inferred = _modality_from_metadata(raw_metadata or {})
+    if inferred is not None:
+        return inferred
+
     normalized = model_id.lower()
     if "embedding" in normalized:
         return "embedding"
-    if any(marker in normalized for marker in ("veo", "video")):
+    if any(marker in normalized for marker in ("veo", "video", "seedance", "hailuo")):
         return "video"
     if any(marker in normalized for marker in ("image", "imagen")):
         return "image"
-    if any(marker in normalized for marker in ("audio", "tts", "lyria", "live")):
+    if any(marker in normalized for marker in ("audio", "tts", "lyria", "live", "speech")):
         return "audio"
     if any(marker in normalized for marker in ("robotics", "computer-use", "research", "aqa")):
         return "other"
@@ -34,7 +38,7 @@ def normalize_discovered_model(
     key_id: str,
     raw_metadata: dict[str, Any] | None = None,
 ) -> DiscoveredModel:
-    modality = guess_modality(model_id)
+    modality = guess_modality(model_id, raw_metadata)
     normalized = model_id.lower()
     special = is_special_route(provider, model_id)
     metadata = raw_metadata or {}
@@ -58,6 +62,38 @@ def normalize_discovered_model(
         max_context_tokens=limits["max_context_tokens"],
         raw_metadata=metadata,
     )
+
+
+def _modality_from_metadata(metadata: dict[str, Any]) -> Modality | None:
+    hints: list[str] = []
+    for key in ("type", "modality"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            hints.append(value)
+
+    task = metadata.get("task")
+    if isinstance(task, dict):
+        for key in ("name", "description", "id"):
+            value = task.get(key)
+            if isinstance(value, str):
+                hints.append(value)
+    elif isinstance(task, str):
+        hints.append(task)
+
+    normalized = " ".join(hints).lower()
+    if not normalized:
+        return None
+    if "embedding" in normalized:
+        return "embedding"
+    if any(marker in normalized for marker in ("text-to-image", "image generation", "image to text", "vision", "image")):
+        return "image"
+    if "video" in normalized:
+        return "video"
+    if any(marker in normalized for marker in ("speech", "audio", "transcription", "asr", "text-to-speech")):
+        return "audio"
+    if any(marker in normalized for marker in ("text generation", "language", "chat", "summarization", "translation")):
+        return "text"
+    return None
 
 
 def _extract_token_limits(metadata: dict[str, Any]) -> dict[str, int | None]:

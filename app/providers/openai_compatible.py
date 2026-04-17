@@ -65,18 +65,24 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     @staticmethod
     def _classify_error_response(status_code: int, body: str) -> ErrorClass:
         body_lower = body.lower()
+        quota_markers = (
+            "limit exceeded",
+            "rate limit",
+            "quota",
+            "insufficient credits",
+            "insufficient balance",
+            "billing",
+            "credits",
+            "payment required",
+            "payment",
+        )
         if status_code == 401:
             return ErrorClass.AUTH_INVALID
+        if status_code == 402:
+            if any(marker in body_lower for marker in quota_markers):
+                return ErrorClass.RATE_LIMIT
+            return ErrorClass.AUTH_FORBIDDEN
         if status_code == 403:
-            quota_markers = (
-                "limit exceeded",
-                "rate limit",
-                "quota",
-                "insufficient credits",
-                "insufficient balance",
-                "billing",
-                "credits",
-            )
             if any(marker in body_lower for marker in quota_markers):
                 return ErrorClass.RATE_LIMIT
             return ErrorClass.AUTH_FORBIDDEN

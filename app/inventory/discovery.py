@@ -249,6 +249,7 @@ def _config_fingerprint(config) -> str:
         parts.append(f"provider={provider_name}")
         parts.append(f"enabled={provider_cfg.enabled}")
         parts.append(f"endpoint={provider_cfg.endpoint}")
+        parts.append(f"account_id={provider_cfg.account_id or ''}")
         for key in sorted(provider_cfg.keys, key=lambda item: item.id):
             key_hash = hashlib.sha256(str(key.key).encode("utf-8")).hexdigest()
             parts.append(f"key={key.id}:{key.active}:{key_hash}")

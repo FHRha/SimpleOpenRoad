@@ -74,8 +74,6 @@ FEATURED_PROVIDER_ORDER = [
     "github",
     "openrouter",
     "groq",
-    "together",
-    "cerebras",
     "cloudflare",
 ]
 
@@ -2096,6 +2094,7 @@ def _interactive_add_provider_key(config_path: str) -> None:
         if not account_id:
             raise typer.BadParameter("Cloudflare Account ID cannot be empty")
         providers[provider]["account_id"] = account_id
+        _save_yaml(path, data)
 
     existing_keys = providers.get(provider, {}).get("keys", [])
     default_key_id = f"{provider}-key-{len(existing_keys) + 1}"
