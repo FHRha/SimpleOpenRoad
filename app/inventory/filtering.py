@@ -49,6 +49,11 @@ def apply_text_filter(model: DiscoveredModel) -> DiscoveredModel:
         model.excluded_reason = f"non_text_modality:{model.modality}"
         return model
 
+    if not model.supports_chat:
+        model.is_text_candidate = False
+        model.excluded_reason = "non_chat_text_task"
+        return model
+
     for marker, reason in GLOBAL_TEXT_EXCLUDE_MARKERS:
         if marker in normalized:
             model.is_text_candidate = False

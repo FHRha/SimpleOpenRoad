@@ -43,20 +43,21 @@ def normalize_discovered_model(
     special = is_special_route(provider, model_id)
     metadata = raw_metadata or {}
     limits = _extract_token_limits(metadata)
+    supports_chat = _supports_chat_task(modality, metadata) and not special
     return DiscoveredModel(
         provider=provider,
         model_id=model_id,
         display_name=model_id,
         source_key_ids=[key_id],
         modality=modality,
-        supports_chat=modality == "text" and not special,
-        supports_responses=modality == "text" and not special,
-        supports_stream=modality == "text" and not special,
+        supports_chat=supports_chat,
+        supports_responses=supports_chat,
+        supports_stream=supports_chat,
         supports_tools=supports_tools(model_id),
         is_free=":free" in normalized,
         is_preview="preview" in normalized,
         is_special=special,
-        is_text_candidate=modality == "text" and not special,
+        is_text_candidate=supports_chat,
         max_input_tokens=limits["max_input_tokens"],
         max_output_tokens=limits["max_output_tokens"],
         max_context_tokens=limits["max_context_tokens"],
@@ -94,6 +95,58 @@ def _modality_from_metadata(metadata: dict[str, Any]) -> Modality | None:
     if any(marker in normalized for marker in ("text generation", "language", "chat", "summarization", "translation")):
         return "text"
     return None
+
+
+def _supports_chat_task(modality: Modality, metadata: dict[str, Any]) -> bool:
+    if modality != "text":
+        return False
+
+    hints: list[str] = []
+    for key in ("type", "modality"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            hints.append(value)
+
+    task = metadata.get("task")
+    if isinstance(task, dict):
+        for key in ("name", "description", "id"):
+            value = task.get(key)
+            if isinstance(value, str):
+                hints.append(value)
+    elif isinstance(task, str):
+        hints.append(task)
+
+    normalized = " ".join(hints).lower()
+    if not normalized:
+        return True
+    if any(
+        marker in normalized
+        for marker in (
+            "text generation",
+            "language model",
+            "large language model",
+            "chat",
+            "dialogue",
+            "instruct",
+        )
+    ):
+        return True
+    if any(
+        marker in normalized
+        for marker in (
+            "text classification",
+            "summarization",
+            "translation",
+            "embeddings",
+            "automatic speech recognition",
+            "speech recognition",
+            "rerank",
+            "reranker",
+            "feature extraction",
+        )
+    ):
+        return False
+    return True
 
 
 def _extract_token_limits(metadata: dict[str, Any]) -> dict[str, int | None]:

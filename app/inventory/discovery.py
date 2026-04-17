@@ -69,9 +69,9 @@ class InventoryDiscoveryService:
                 try:
                     discovered_records = await adapter.list_model_records(key)
                     discovered = [
-                        str(item.get("id") or item.get("name") or item.get("model"))
+                        str(_record_model_id(provider_name, item))
                         for item in discovered_records
-                        if isinstance(item, dict) and (item.get("id") or item.get("name") or item.get("model"))
+                        if isinstance(item, dict) and _record_model_id(provider_name, item)
                     ]
                     latency_ms = (time.perf_counter() - started) * 1000
                     key_results.append(
@@ -142,7 +142,7 @@ class InventoryDiscoveryService:
     ) -> None:
         for item in model_records:
             if isinstance(item, dict):
-                model_id_raw = item.get("id") or item.get("name") or item.get("model")
+                model_id_raw = _record_model_id(provider, item)
                 metadata = item
             else:
                 model_id_raw = item
@@ -256,3 +256,11 @@ def _config_fingerprint(config) -> str:
     for override in config.inventory.overrides:
         parts.append(f"override={override.model_dump_json()}")
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _record_model_id(provider: str, item: dict[str, Any]) -> str | None:
+    if provider == "cloudflare":
+        preferred = item.get("name") or item.get("model") or item.get("id")
+        return str(preferred) if preferred else None
+    preferred = item.get("id") or item.get("name") or item.get("model")
+    return str(preferred) if preferred else None

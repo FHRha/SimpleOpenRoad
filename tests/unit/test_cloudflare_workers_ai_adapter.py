@@ -49,7 +49,12 @@ async def test_cloudflare_lists_models_from_model_search_endpoint() -> None:
     ).mock(
         return_value=httpx.Response(
             200,
-            json={"result": [{"id": "@cf/meta/llama-3.1-8b-instruct"}, {"name": "@cf/openai/gpt-oss-20b"}]},
+            json={
+                "result": [
+                    {"id": "uuid-1", "name": "@cf/meta/llama-3.1-8b-instruct"},
+                    {"name": "@cf/openai/gpt-oss-20b"},
+                ]
+            },
         )
     )
 

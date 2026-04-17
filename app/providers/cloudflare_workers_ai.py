@@ -54,7 +54,8 @@ class CloudflareWorkersAIAdapter(OpenAICompatibleAdapter):
         for item in items:
             if not isinstance(item, dict):
                 continue
-            model_id = item.get("id") or item.get("name") or item.get("model")
+            preferred_name = item.get("name")
+            model_id = preferred_name or item.get("model") or item.get("id")
             if not model_id:
                 continue
             record = dict(item)

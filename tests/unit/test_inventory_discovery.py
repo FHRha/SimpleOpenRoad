@@ -198,6 +198,64 @@ async def test_inventory_discovery_uses_metadata_to_exclude_non_text_together_mo
 
 
 @pytest.mark.asyncio
+async def test_inventory_discovery_excludes_non_chat_text_tasks_from_cloudflare_aliases() -> None:
+    config = GatewayConfig(
+        storage={"sqlite_path": "data/test_inventory.db"},
+        providers={
+            "cloudflare": ProviderConfig(
+                endpoint="https://api.cloudflare.com/client/v4",
+                priority=10,
+                account_id="acc-123",
+                keys=[KeyConfig(id="cloudflare-main", key="secret-1")],
+            )
+        },
+    )
+    runtime_config = RuntimeConfig(config=config, env=EnvSettings())
+    provider_cfg = runtime_config.get().providers["cloudflare"]
+    service = InventoryDiscoveryService(
+        runtime_config=runtime_config,
+        providers={
+            "cloudflare": MetadataAdapter(
+                provider_name="cloudflare",
+                config=provider_cfg,
+                records=[
+                    {
+                        "id": "uuid-text-gen",
+                        "name": "@cf/meta/llama-3.1-8b-instruct",
+                        "task": {"name": "Text Generation"},
+                    },
+                    {
+                        "id": "uuid-summary",
+                        "name": "@cf/facebook/bart-large-cnn",
+                        "task": {"name": "Summarization"},
+                    },
+                    {
+                        "id": "uuid-classify",
+                        "name": "@cf/huggingface/distilbert-sst-2-int8",
+                        "task": {"name": "Text Classification"},
+                    },
+                ],
+            )
+        },
+    )
+
+    snapshot = await service.refresh()
+
+    models = {item.model_id: item for item in snapshot.models}
+    assert "@cf/meta/llama-3.1-8b-instruct" in models
+    assert models["@cf/meta/llama-3.1-8b-instruct"].is_text_candidate is True
+    assert models["@cf/facebook/bart-large-cnn"].is_text_candidate is False
+    assert models["@cf/facebook/bart-large-cnn"].excluded_reason == "non_chat_text_task"
+    assert models["@cf/huggingface/distilbert-sst-2-int8"].is_text_candidate is False
+    assert models["@cf/huggingface/distilbert-sst-2-int8"].excluded_reason == "non_chat_text_task"
+
+    alias_map = {item.alias_id: item for item in snapshot.generated_aliases}
+    general = alias_map["cloudflare/text/general"]
+    candidate_ids = [item.model_id for item in general.candidates]
+    assert candidate_ids == ["@cf/meta/llama-3.1-8b-instruct"]
+
+
+@pytest.mark.asyncio
 async def test_inventory_discovery_records_auth_failure_per_key() -> None:
     runtime_config = _runtime_config()
     gemini_cfg = runtime_config.get().providers["gemini"]

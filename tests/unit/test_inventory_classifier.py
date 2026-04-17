@@ -38,6 +38,20 @@ def test_inventory_classifier_scores_free_fast_model() -> None:
     assert "fast" in classification.classification_tags
 
 
+def test_inventory_classifier_does_not_treat_minimax_provider_name_as_mini_fast_marker() -> None:
+    model = DiscoveredModel(
+        provider="together",
+        model_id="MiniMaxAI/MiniMax-M2",
+        display_name="MiniMaxAI/MiniMax-M2",
+        modality="text",
+        is_text_candidate=True,
+    )
+
+    classification = classify_model(model)
+
+    assert classification.fast_score == 0
+
+
 def test_inventory_classifier_marks_excluded_model() -> None:
     model = DiscoveredModel(
         provider="gemini",

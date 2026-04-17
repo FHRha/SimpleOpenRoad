@@ -6,7 +6,7 @@ from app.config.models import InventoryOverrideConfig, ModelCapabilitiesConfig
 from app.inventory.models import DiscoveredModel, ModelClassification
 from app.inventory.overrides import apply_classification_overrides
 
-FAST_MARKERS = ("nano", "mini", "lite", "flash", "haiku", "small")
+FAST_MARKERS = ("nano", "lite", "flash", "haiku", "small")
 REASONING_MARKERS = ("pro", "opus", "sonnet", "thinking", "reasoning", "o1", "o3", "o4")
 CODE_MARKERS = ("codex", "coder", "codestral", "devstral", "mercury-coder", "grok-code")
 GENERAL_MARKERS = (
@@ -30,6 +30,7 @@ def classify_model(
     normalized = model.model_id.lower()
     free_score = 100 if model.is_free else 0
     fast_score = sum(30 for marker in FAST_MARKERS if marker in normalized)
+    fast_score += 30 if _has_mini_token(normalized) else 0
     reasoning_score = sum(30 for marker in REASONING_MARKERS if marker in normalized)
     code_score = sum(45 for marker in CODE_MARKERS if marker in normalized)
     general_score = 20 if model.is_text_candidate else 0
@@ -94,3 +95,23 @@ def classify_model(
         overrides=overrides or [],
         capabilities=capabilities,
     )
+
+
+def _has_mini_token(normalized: str) -> bool:
+    separators = "/:._- "
+    token = "mini"
+    start = 0
+    while True:
+        index = normalized.find(token, start)
+        if index == -1:
+            return False
+        before = normalized[index - 1] if index > 0 else ""
+        after_index = index + len(token)
+        after = normalized[after_index] if after_index < len(normalized) else ""
+        before_ok = before == "" or before in separators
+        after_ok = after == "" or after in separators
+        if before_ok and after_ok:
+            return True
+        start = index + 1
+        if start >= len(normalized):
+            return False
