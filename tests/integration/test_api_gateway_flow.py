@@ -508,9 +508,10 @@ def test_503_includes_route_candidate_diagnostics(monkeypatch, tmp_path: Path) -
     body = response.json()
     assert body["error"]["type"] == "provider_unavailable"
     assert body["error"]["code"] == "provider_unavailable"
-    assert body["error"]["message"] == "No healthy route candidates available"
+    assert body["error"]["message"] == "No healthy route candidates are currently available."
     detail = body["detail"]
     assert detail["type"] == "provider_unavailable"
+    assert detail["raw_message"] == "No healthy route candidates available"
     assert detail["details"]["analysis"]["intent"] == "trivial"
     assert detail["details"]["analysis"]["profile"] == "fast"
     assert detail["details"]["route_memory"]["status"] == "ignored_direct"

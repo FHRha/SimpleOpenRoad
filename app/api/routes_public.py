@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.api.deps import get_container, require_user_auth
 from app.api.schemas_openai import ChatCompletionsRequestSchema, ResponsesRequestSchema
 from app.container import AppContainer
-from app.core.errors import GatewayError
+from app.core.errors import GatewayError, user_facing_error_message
 from app.core.types import ChatMessage, RouterDecision, UnifiedLLMRequest
 from app.inventory.models import GeneratedAlias, GeneratedAliasCandidate
 from app.router.alias_resolver import resolve_candidates
@@ -110,22 +110,28 @@ def _decision_headers(request_id: str, decision: RouterDecision, payload: dict |
 
 
 def _gateway_error_payload(exc: GatewayError) -> dict:
+    message = user_facing_error_message(exc)
     detail = {
-        "message": exc.message,
+        "message": message,
         "type": exc.error_class.value,
         "provider": exc.provider,
         "key_id": exc.key_id,
     }
     if exc.details:
         detail["details"] = exc.details
+    if message != exc.message:
+        detail["raw_message"] = exc.message
     return {
         "error": {
-            "message": exc.message,
+            "message": message,
             "type": exc.error_class.value,
             "code": exc.error_class.value,
             "provider": exc.provider,
             "key_id": exc.key_id,
-            "sor_details": exc.details or {},
+            "sor_details": {
+                **(exc.details or {}),
+                "raw_message": exc.message,
+            },
         },
         "detail": detail,
     }
