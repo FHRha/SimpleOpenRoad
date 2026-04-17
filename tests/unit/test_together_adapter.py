@@ -37,9 +37,9 @@ async def test_together_uses_openai_chat_endpoint() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_together_lists_models_from_standard_endpoint() -> None:
+async def test_together_lists_models_from_top_level_array() -> None:
     respx.get("https://api.together.xyz/v1/models").mock(
-        return_value=httpx.Response(200, json={"data": [{"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"}]})
+        return_value=httpx.Response(200, json=[{"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"}])
     )
 
     models = await _adapter().list_models(KeyConfig(id="together-main", key="together-token"))

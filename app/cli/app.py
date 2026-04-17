@@ -1268,9 +1268,10 @@ def _print_provider_choices(provider_names: list[str]) -> list[str]:
     ]
     index = 1
     for title, items in groups:
+        console.print(f"--- {title} ---")
         if not items:
+            console.print("<none>")
             continue
-        console.print(title + ":")
         for provider in items:
             console.print(f"{index}) {provider}")
             index += 1
