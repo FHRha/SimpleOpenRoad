@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from app.config.loader import load_gateway_config
+from app.config.loader import load_gateway_config, load_raw_gateway_config
 from app.core.errors import ConfigError
 
 
@@ -123,3 +123,53 @@ health:
     assert cfg.inventory.refresh_time == "04:30"
     assert cfg.inventory.refresh_timezone == "UTC"
     assert cfg.inventory.refresh_interval_hours == 12
+
+
+def test_load_gateway_config_merges_missing_provider_defaults_from_example(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.example.yaml").write_text(
+        """
+providers:
+  github:
+    enabled: true
+    priority: 30
+    endpoint: https://models.github.ai/inference
+    timeout_seconds: 45
+    keys: []
+  cloudflare:
+    enabled: true
+    priority: 29
+    endpoint: https://api.cloudflare.com/client/v4
+    account_id: ""
+    timeout_seconds: 45
+    keys: []
+health:
+  startup_check: true
+""",
+        encoding="utf-8",
+    )
+    (config_dir / "config.yaml").write_text(
+        """
+providers:
+  github:
+    enabled: false
+    priority: 5
+    endpoint: https://custom.example/github
+    keys: []
+health:
+  startup_check: false
+""",
+        encoding="utf-8",
+    )
+
+    raw = load_raw_gateway_config(config_dir / "config.yaml")
+    cfg = load_gateway_config(str(config_dir / "config.yaml"))
+
+    assert "cloudflare" in raw["providers"]
+    assert raw["providers"]["cloudflare"]["endpoint"] == "https://api.cloudflare.com/client/v4"
+    assert cfg.providers["github"].endpoint == "https://custom.example/github"
+    assert cfg.providers["github"].priority == 5
+    assert "cloudflare" in cfg.providers
+    assert cfg.providers["cloudflare"].account_id == ""
+    assert cfg.health.startup_check is False

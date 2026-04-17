@@ -29,7 +29,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from app.config.loader import load_gateway_config
+from app.config.loader import load_gateway_config, load_raw_gateway_config
 from app.config.models import GatewayConfig
 from app.container import AppContainer
 from app.core.errors import ConfigError
@@ -109,9 +109,10 @@ def _config_path(value: str | None) -> Path:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        raise typer.BadParameter(f"Config file does not exist: {path}")
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        data = load_raw_gateway_config(path)
+    except ConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     if not isinstance(data, dict):
         raise typer.BadParameter("Config root must be YAML mapping")
     return data

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 from pathlib import Path
 
@@ -26,6 +27,35 @@ def _read_yaml_with_env_expansion(path: Path) -> dict:
     return raw
 
 
+def _default_config_path(path: Path) -> Path | None:
+    candidate = path.with_name("config.example.yaml")
+    if candidate.exists():
+        return candidate
+    return None
+
+
+def _merge_missing_defaults(raw: dict, defaults: dict) -> dict:
+    merged = deepcopy(raw)
+    for key, default_value in defaults.items():
+        current_value = merged.get(key)
+        if key not in merged:
+            merged[key] = deepcopy(default_value)
+            continue
+        if isinstance(current_value, dict) and isinstance(default_value, dict):
+            merged[key] = _merge_missing_defaults(current_value, default_value)
+    return merged
+
+
+def load_raw_gateway_config(config_path: str | Path) -> dict:
+    path = Path(config_path)
+    raw = _read_yaml_with_env_expansion(path)
+    default_path = _default_config_path(path)
+    if default_path is not None and default_path != path:
+        defaults = _read_yaml_with_env_expansion(default_path)
+        raw = _merge_missing_defaults(raw, defaults)
+    return raw
+
+
 def load_env_settings() -> EnvSettings:
     return EnvSettings()
 
@@ -41,7 +71,7 @@ def load_gateway_config(config_path: str | None = None, env: EnvSettings | None 
     env_settings = env or load_env_settings()
     path = Path(config_path or env_settings.app_config_path)
     try:
-        raw = _read_yaml_with_env_expansion(path)
+        raw = load_raw_gateway_config(path)
         config = GatewayConfig.model_validate(raw)
         _apply_route_alias_migrations(config)
     except Exception as exc:  # noqa: BLE001 - converted into domain error
