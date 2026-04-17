@@ -26,6 +26,14 @@ def _adapter_with_v1_endpoint() -> OpenAICompatibleAdapter:
     )
 
 
+def _adapter_with_headers(headers: dict[str, str]) -> OpenAICompatibleAdapter:
+    return OpenAICompatibleAdapter(
+        provider_name="openrouter",
+        config=ProviderConfig(endpoint="https://openrouter.example/api/v1", headers=headers, keys=[]),
+        extra_headers={"X-Default": "adapter", "X-Override": "adapter"},
+    )
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_openai_compatible_stream_preserves_sse_event_boundaries() -> None:
@@ -77,6 +85,19 @@ async def test_openai_compatible_lists_models_with_get() -> None:
     models = await _adapter_with_v1_endpoint().list_models(KeyConfig(id="openrouter-main", key="secret"))
 
     assert models == ["openai/gpt-4o-mini"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_openai_compatible_config_headers_override_adapter_defaults() -> None:
+    route = respx.get("https://openrouter.example/api/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "openai/gpt-4o-mini"}]})
+    )
+
+    await _adapter_with_headers({"X-Override": "config"}).list_models(KeyConfig(id="openrouter-main", key="secret"))
+
+    assert route.calls.last.request.headers["x-default"] == "adapter"
+    assert route.calls.last.request.headers["x-override"] == "config"
 
 
 @pytest.mark.asyncio

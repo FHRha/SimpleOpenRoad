@@ -81,8 +81,10 @@ class InventoryDiscoveryService:
                             status="valid" if discovered else "degraded",
                             discovered_models=len(discovered),
                             latency_ms=latency_ms,
-                            error_code=None,
-                            error_message=None,
+                            error_code=None if discovered else "no_models_discovered",
+                            error_message=None
+                            if discovered
+                            else f"Provider {provider_name} returned an empty model catalog during inventory refresh",
                             checked_at=utcnow_iso(),
                         )
                     )

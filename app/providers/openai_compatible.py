@@ -27,8 +27,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
             "Authorization": f"Bearer {key.key}",
             "Content-Type": "application/json",
         }
-        headers.update(self.config.headers)
         headers.update(self.extra_headers)
+        headers.update(self.config.headers)
         return headers
 
     def _url(self, path: str) -> str:
@@ -214,7 +214,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 "error_message": exc.message,
             }
 
-    async def _get(self, path: str, key: KeyConfig) -> dict:
+    async def _get(self, path: str, key: KeyConfig) -> object:
         timeout = httpx.Timeout(timeout=self.config.timeout_seconds)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:

@@ -188,6 +188,29 @@ async def test_inventory_discovery_records_auth_failure_per_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inventory_discovery_records_empty_catalog_reason() -> None:
+    runtime_config = _runtime_config()
+    openrouter_cfg = runtime_config.get().providers["openrouter"]
+    service = InventoryDiscoveryService(
+        runtime_config=runtime_config,
+        providers={
+            "openrouter": SuccessAdapter(
+                provider_name="openrouter",
+                config=openrouter_cfg,
+                models=[],
+            ),
+        },
+    )
+
+    snapshot = await service.refresh()
+
+    result = next(item for item in snapshot.key_results if item.provider == "openrouter")
+    assert result.status == "degraded"
+    assert result.error_code == "no_models_discovered"
+    assert "empty model catalog" in str(result.error_message)
+
+
+@pytest.mark.asyncio
 async def test_inventory_discovery_applies_provider_specific_text_filters() -> None:
     runtime_config = _runtime_config()
     openrouter_cfg = runtime_config.get().providers["openrouter"]

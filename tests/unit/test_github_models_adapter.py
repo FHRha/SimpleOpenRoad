@@ -14,6 +14,10 @@ def _adapter(endpoint: str = "https://models.github.ai") -> GitHubModelsAdapter:
     return GitHubModelsAdapter(config=ProviderConfig(endpoint=endpoint, keys=[]))
 
 
+def _adapter_with_headers(headers: dict[str, str]) -> GitHubModelsAdapter:
+    return GitHubModelsAdapter(config=ProviderConfig(endpoint="https://models.github.ai", headers=headers, keys=[]))
+
+
 @pytest.mark.asyncio
 @respx.mock
 async def test_github_models_uses_inference_chat_endpoint() -> None:
@@ -35,7 +39,21 @@ async def test_github_models_uses_inference_chat_endpoint() -> None:
     assert result["choices"][0]["message"]["content"] == "ok"
     assert route.calls.last.request.headers["authorization"] == "Bearer github-token"
     assert route.calls.last.request.headers["accept"] == "application/vnd.github+json"
-    assert route.calls.last.request.headers["x-github-api-version"] == "2026-03-10"
+    assert route.calls.last.request.headers["x-github-api-version"] == "2022-11-28"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_models_config_headers_override_adapter_defaults() -> None:
+    route = respx.get("https://models.github.ai/catalog/models").mock(
+        return_value=httpx.Response(200, json=[{"id": "openai/gpt-4.1-mini"}])
+    )
+
+    await _adapter_with_headers({"X-GitHub-Api-Version": "2022-custom"}).list_models(
+        KeyConfig(id="github-main", key="github-token")
+    )
+
+    assert route.calls.last.request.headers["x-github-api-version"] == "2022-custom"
 
 
 @pytest.mark.asyncio
@@ -117,6 +135,21 @@ async def test_github_models_lists_catalog_models_when_api_returns_root_array() 
     models = await _adapter().list_models(KeyConfig(id="github-main", key="github-token"))
 
     assert models == ["openai/gpt-4.1", "azureml/Phi-4-reasoning"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_github_models_validate_reports_empty_catalog_shape() -> None:
+    respx.get("https://models.github.ai/catalog/models").mock(
+        return_value=httpx.Response(200, json={"unexpected": []})
+    )
+
+    result = await _adapter().validate_key(KeyConfig(id="github-main", key="github-token"))
+
+    assert result["status"] == "degraded"
+    assert result["models"] == []
+    assert result["error_code"] == "no_models_discovered"
+    assert "response_shape=dict(keys=[unexpected])" in result["error_message"]
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
             config=config,
             extra_headers={
                 "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2026-03-10",
+                "X-GitHub-Api-Version": "2022-11-28",
             },
         )
 
@@ -47,8 +47,47 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
         records = await self.list_model_records(key)
         return [str(item["id"]) for item in records if item.get("id")]
 
+    async def validate_key(self, key: KeyConfig) -> dict:
+        try:
+            data = await self._get(self.models_path, key)
+            models = self._model_records_from_catalog(data)
+            if not models:
+                return {
+                    "status": "degraded",
+                    "models": [],
+                    "error_code": "no_models_discovered",
+                    "error_message": (
+                        "GitHub catalog returned no model records; "
+                        f"url={self._url(self.models_path)}; response_shape={self._response_shape(data)}"
+                    ),
+                }
+            return {
+                "status": "valid",
+                "models": [str(item["id"]) for item in models if item.get("id")],
+                "error_code": None,
+                "error_message": None,
+            }
+        except GatewayError as exc:
+            status = "invalid" if exc.error_class in (ErrorClass.AUTH_INVALID, ErrorClass.AUTH_FORBIDDEN) else "degraded"
+            return {
+                "status": status,
+                "models": [],
+                "error_code": exc.error_class.value,
+                "error_message": exc.message,
+            }
+        except Exception as exc:  # noqa: BLE001 - validation must return diagnostics instead of crashing CLI.
+            return {
+                "status": "degraded",
+                "models": [],
+                "error_code": "validation_exception",
+                "error_message": f"GitHub validation failed: {type(exc).__name__}: {exc}",
+            }
+
     async def list_model_records(self, key: KeyConfig) -> list[dict[str, Any]]:
         data = await self._get(self.models_path, key)
+        return self._model_records_from_catalog(data)
+
+    def _model_records_from_catalog(self, data: object) -> list[dict[str, Any]]:
         items = self._extract_model_items(data)
         models: list[dict[str, Any]] = []
         for item in items:
@@ -74,3 +113,13 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
                 if isinstance(nested, list):
                     return nested
         return []
+
+    @staticmethod
+    def _response_shape(data: object) -> str:
+        if isinstance(data, list):
+            sample_type = type(data[0]).__name__ if data else "empty"
+            return f"list(len={len(data)}, first={sample_type})"
+        if isinstance(data, dict):
+            keys = ", ".join(sorted(str(key) for key in data.keys())[:8])
+            return f"dict(keys=[{keys}])"
+        return type(data).__name__

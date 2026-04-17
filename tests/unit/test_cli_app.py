@@ -786,6 +786,118 @@ def test_keys_validate_prints_summary_table(monkeypatch, tmp_path: Path) -> None
     assert "region_blocked" in result.stdout
 
 
+def test_providers_test_shows_error_message_when_error_code_missing(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+
+    class _FakeAdminService:
+        async def validate_all_keys(self) -> list[dict]:
+            return [
+                {
+                    "provider": "github",
+                    "key_id": "github-main",
+                    "status": "degraded",
+                    "models": [],
+                    "latency_ms": 12.3,
+                    "error_code": None,
+                    "error_message": "GitHub catalog returned no model records",
+                }
+            ]
+
+    class _FakeContainer:
+        admin_service = _FakeAdminService()
+
+    monkeypatch.setattr("app.cli.app._container", lambda config_path: _FakeContainer())
+
+    result = runner.invoke(cli_app, ["providers", "test", "--config-path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Provider Key Checks" in result.stdout
+    assert "GitHub catalog" in result.stdout
+    assert "no model" in result.stdout
+    assert "records" in result.stdout
+    assert "0" in result.stdout
+
+
+def test_providers_consistency_compares_runtime_health_and_inventory(monkeypatch, tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    cfg = load_gateway_config(str(config_path))
+
+    class _RuntimeConfig:
+        def get(self):
+            return cfg
+
+    class _RuntimeRepo:
+        def list_states(self) -> list[dict]:
+            return [
+                {
+                    "key_id": "github-main",
+                    "provider": "github",
+                    "status": "degraded",
+                    "last_error_code": "old_error",
+                }
+            ]
+
+    class _KeyRegistry:
+        runtime_repo = _RuntimeRepo()
+
+        def list_configured_keys(self, cfg, include_unconfigured: bool = False) -> list[dict]:
+            return [
+                {
+                    "provider": "github",
+                    "id": "github-main",
+                    "configured": True,
+                    "status": "degraded",
+                }
+            ]
+
+    class _AdminService:
+        async def refresh_inventory(self) -> dict:
+            return {
+                "key_results": [
+                    {
+                        "provider": "github",
+                        "key_id": "github-main",
+                        "status": "valid",
+                        "discovered_models": 2,
+                        "error_code": None,
+                        "error_message": None,
+                    }
+                ]
+            }
+
+        def current_inventory(self) -> dict:
+            return {}
+
+        def latest_health(self) -> list[dict]:
+            return [
+                {
+                    "provider": "github",
+                    "key_id": "github-main",
+                    "status": "valid",
+                    "models_json": "[\"openai/gpt-4.1\", \"openai/gpt-4.1-mini\"]",
+                    "error_code": None,
+                    "error_message": None,
+                }
+            ]
+
+    class _FakeContainer:
+        runtime_config = _RuntimeConfig()
+        key_registry = _KeyRegistry()
+        admin_service = _AdminService()
+
+    monkeypatch.setattr("app.cli.app._container", lambda config_path: _FakeContainer())
+
+    result = runner.invoke(cli_app, ["providers", "consistency", "--config-path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Provider Key Consistency" in result.stdout
+    assert "runtime" not in result.stderr.lower()
+    assert "2/2" in result.stdout
+    assert "old_error" in result.stdout
+
+
 def test_cli_panel_exits_after_full_uninstall(monkeypatch) -> None:
     runner = CliRunner()
     called: dict[str, bool] = {}

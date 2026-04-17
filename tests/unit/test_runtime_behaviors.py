@@ -77,6 +77,11 @@ class SlowValidateProviderAdapter(DummyProviderAdapter):
         return {"status": "valid", "models": ["m1"], "error_code": None, "error_message": None}
 
 
+class ExplodingValidateProviderAdapter(DummyProviderAdapter):
+    async def validate_key(self, key):  # type: ignore[override]
+        raise RuntimeError("boom")
+
+
 class RateLimitFirstModelAdapter(DummyProviderAdapter):
     async def chat_completions(self, request: UnifiedLLMRequest, key):  # type: ignore[override]
         if request.model in {"gpt-4.1-mini", "m1"}:
@@ -381,6 +386,57 @@ async def test_health_checker_respects_check_timeout(tmp_path: Path) -> None:
 
     assert result["status"] == "degraded"
     assert result["error_code"] == "health_check_timeout"
+
+
+@pytest.mark.asyncio
+async def test_health_checker_records_validation_exception(tmp_path: Path) -> None:
+    runtime_config = _build_runtime_config(str(tmp_path / "gateway.db"))
+    runtime_config.get().health.check_timeout_seconds = 1
+    db = SQLiteDB(runtime_config.get().storage.sqlite_path)
+    db.initialize(str(_schema_path()))
+    keys_repo = KeysRuntimeRepository(db)
+    health_repo = HealthRepository(db)
+    key_registry = KeyRegistry(keys_repo)
+    key_registry.sync_defaults(runtime_config.get())
+
+    checker = HealthChecker(
+        runtime_config=runtime_config,
+        providers={"p1": ExplodingValidateProviderAdapter()},
+        key_registry=key_registry,
+        health_repo=health_repo,
+    )
+    result = await checker.validate_single_key(provider_name="p1", key_id="p1-high")
+
+    assert result["status"] == "degraded"
+    assert result["error_code"] == "validation_exception"
+    assert "RuntimeError: boom" in result["error_message"]
+
+
+def test_valid_health_clears_previous_runtime_error_state(tmp_path: Path) -> None:
+    runtime_config = _build_runtime_config(str(tmp_path / "gateway.db"))
+    db = SQLiteDB(runtime_config.get().storage.sqlite_path)
+    db.initialize(str(_schema_path()))
+    keys_repo = KeysRuntimeRepository(db)
+    key_registry = KeyRegistry(keys_repo)
+    key_registry.sync_defaults(runtime_config.get())
+    key = runtime_config.get().providers["p1"].keys[0]
+    key_registry.record_failure(key=key, error_class=ErrorClass.PROVIDER_UNAVAILABLE, error_message="old error")
+
+    key_registry.mark_health(
+        key_id=key.id,
+        status="valid",
+        checked_at="2026-04-17T00:00:00+00:00",
+        error_code=None,
+        error_message=None,
+    )
+
+    state = keys_repo.get_state(key.id)
+    assert state is not None
+    assert state["status"] == "valid"
+    assert state["consecutive_errors"] == 0
+    assert state["cooldown_until"] is None
+    assert state["last_error_code"] is None
+    assert state["last_error_message"] is None
 
 
 @pytest.mark.asyncio

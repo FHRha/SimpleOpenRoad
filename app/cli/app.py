@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 import secrets
 import shlex
@@ -200,7 +201,7 @@ def _print_key_validation_results(results: list[dict[str, Any]], title: str = "K
     table.add_column("Status")
     table.add_column("Latency ms")
     table.add_column("Models")
-    table.add_column("Error")
+    table.add_column("Error", overflow="fold")
     if not results:
         table.add_row("-", "-", "<empty>", "-", "-", "-")
         console.print(table)
@@ -219,9 +220,13 @@ def _print_key_validation_results(results: list[dict[str, Any]], title: str = "K
             str(row.get("status", "")),
             latency_text,
             str(model_count),
-            str(row.get("error_code") or row.get("error_message") or "-")[:120],
+            str(row.get("error_code") or row.get("error_message") or "-")[:160],
         )
     console.print(table)
+
+
+def _result_error_text(row: dict[str, Any], limit: int = 160) -> str:
+    return str(row.get("error_code") or row.get("error_message") or "-")[:limit]
 
 
 def _load_env_file(env_path: Path = Path(".env")) -> dict[str, str]:
@@ -2046,7 +2051,7 @@ def providers_inventory(
                 str(item.get("key_id", "")),
                 str(item.get("status", "")),
                 str(item.get("discovered_models", "")),
-                str(item.get("error_code", "") or "-"),
+                _result_error_text(item),
             )
     console.print(summary)
 
@@ -2162,16 +2167,116 @@ def providers_test(config_path: str = typer.Option("config/config.yaml", help="P
     table.add_column("Key")
     table.add_column("Status")
     table.add_column("Latency ms")
+    table.add_column("Models")
     table.add_column("Error")
     for row in results:
+        models = row.get("models") if isinstance(row, dict) else []
+        model_count = len(models) if isinstance(models, list) else 0
         table.add_row(
             str(row.get("provider")),
             str(row.get("key_id")),
             str(row.get("status")),
             f"{float(row.get('latency_ms', 0.0)):.2f}",
-            str(row.get("error_code") or ""),
+            str(model_count),
+            _result_error_text(row),
         )
     console.print(table)
+
+
+@providers_app.command("consistency")
+def providers_consistency(
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+    refresh: bool = typer.Option(True, "--refresh/--cached", help="Refresh inventory before comparing"),
+) -> None:
+    import asyncio
+
+    container = _container(config_path)
+    cfg = container.runtime_config.get()
+    if refresh:
+        snapshot = asyncio.run(container.admin_service.refresh_inventory())
+    else:
+        snapshot = container.admin_service.current_inventory()
+    snapshot = snapshot or {}
+
+    runtime_by_key = {str(item.get("key_id")): item for item in container.key_registry.runtime_repo.list_states()}
+    latest_health = {str(item.get("key_id")): item for item in container.admin_service.latest_health()}
+    inventory_results = {
+        str(item.get("key_id")): item
+        for item in snapshot.get("key_results", [])
+        if isinstance(item, dict)
+    }
+
+    table = Table(title="Provider Key Consistency", box=box.ASCII)
+    table.add_column("Provider")
+    table.add_column("Key")
+    table.add_column("Config")
+    table.add_column("Runtime")
+    table.add_column("Health")
+    table.add_column("Inventory")
+    table.add_column("Models H/I")
+    table.add_column("Last error", overflow="fold")
+
+    rows = container.key_registry.list_configured_keys(cfg, include_unconfigured=True)
+    if not rows:
+        table.add_row("-", "-", "<empty>", "-", "-", "-", "0", "-")
+    diagnostic_lines: list[str] = []
+    for row in rows:
+        key_id = str(row.get("id", ""))
+        runtime = runtime_by_key.get(key_id, {})
+        health = latest_health.get(key_id, {})
+        inventory = inventory_results.get(key_id, {})
+        health_models = _health_models_count(health)
+        inventory_models = int(inventory.get("discovered_models", 0) or 0) if inventory else 0
+        last_error = _first_non_empty(
+            runtime.get("last_error_code"),
+            health.get("error_code"),
+            health.get("error_message"),
+            inventory.get("error_code"),
+            inventory.get("error_message"),
+            "-",
+        )
+        table.add_row(
+            str(row.get("provider", "")),
+            key_id,
+            "configured" if row.get("configured") else "placeholder",
+            str(runtime.get("status", row.get("status", "unknown"))),
+            str(health.get("status", "-")),
+            str(inventory.get("status", "-")),
+            f"{health_models}/{inventory_models}",
+            last_error[:160],
+        )
+        diagnostic_lines.append(
+            "Key consistency: "
+            f"provider={row.get('provider', '')} key={key_id} "
+            f"config={'configured' if row.get('configured') else 'placeholder'} "
+            f"runtime={runtime.get('status', row.get('status', 'unknown'))} "
+            f"health={health.get('status', '-')} inventory={inventory.get('status', '-')} "
+            f"models={health_models}/{inventory_models} last_error={last_error}"
+        )
+    console.print(table)
+    for line in diagnostic_lines:
+        console.print(line)
+
+
+def _health_models_count(row: dict[str, Any]) -> int:
+    raw = row.get("models_json")
+    if not raw:
+        return 0
+    try:
+        parsed = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return 0
+    return len(parsed) if isinstance(parsed, list) else 0
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if text:
+            return text
+    return ""
 
 
 @keys_app.command("list")
@@ -3930,7 +4035,8 @@ def _run_diagnostics_panel(config_path: str) -> None:
                 "3) Route preview",
                 "4) Show runtime stats",
                 "5) Show service logs",
-                "6) Troubleshooting guide",
+                "6) Key consistency",
+                "7) Troubleshooting guide",
                 "0) Back",
             ],
         )
@@ -3953,6 +4059,9 @@ def _run_diagnostics_panel(config_path: str) -> None:
                 service_logs(mode="system", lines=100)
                 _pause()
             elif choice == "6":
+                providers_consistency(config_path=config_path)
+                _pause()
+            elif choice == "7":
                 _print_troubleshooting_guide()
                 _pause()
             elif choice == "0":

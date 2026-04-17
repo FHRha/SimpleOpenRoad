@@ -77,6 +77,13 @@ class HealthChecker:
                 "error_code": "health_check_timeout",
                 "error_message": "Health check timed out",
             }
+        except Exception as exc:  # noqa: BLE001 - health checks should persist diagnostics, not crash the CLI/API.
+            result = {
+                "status": "degraded",
+                "models": [],
+                "error_code": "validation_exception",
+                "error_message": f"{type(exc).__name__}: {exc}",
+            }
         latency_ms = (time.perf_counter() - start) * 1000
         checked_at = datetime.now(UTC).isoformat()
         status = result.get("status", "degraded")

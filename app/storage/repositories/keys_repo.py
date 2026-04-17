@@ -137,13 +137,28 @@ class KeysRuntimeRepository:
         error_message: str | None,
     ) -> None:
         with self.db.connection() as conn:
+            if status == "valid":
+                conn.execute(
+                    """
+                    UPDATE key_runtime_state
+                    SET status = ?,
+                        last_check_at = ?,
+                        consecutive_errors = 0,
+                        cooldown_until = NULL,
+                        last_error_code = NULL,
+                        last_error_message = NULL
+                    WHERE key_id = ?
+                    """,
+                    (status, checked_at, key_id),
+                )
+                return
             conn.execute(
                 """
                 UPDATE key_runtime_state
                 SET status = ?,
                     last_check_at = ?,
-                    last_error_code = COALESCE(?, last_error_code),
-                    last_error_message = COALESCE(?, last_error_message)
+                    last_error_code = ?,
+                    last_error_message = ?
                 WHERE key_id = ?
                 """,
                 (status, checked_at, error_code, error_message, key_id),
