@@ -156,6 +156,7 @@ class ProviderConfig(BaseModel):
     enabled: bool = True
     priority: int = 100
     endpoint: str
+    account_id: str | None = None
     timeout_seconds: int = 45
     headers: dict[str, str] = Field(default_factory=dict)
     keys: list[KeyConfig] = Field(default_factory=list)

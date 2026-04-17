@@ -69,6 +69,18 @@ cli_app.add_typer(service_app, name="service")
 
 console = Console()
 
+FEATURED_PROVIDER_ORDER = [
+    "gemini",
+    "github",
+    "openrouter",
+    "groq",
+    "together",
+    "cerebras",
+    "cloudflare",
+]
+
+FEATURED_PROVIDER_SET = set(FEATURED_PROVIDER_ORDER)
+
 SERVICE_NAME = "sor"
 _ROUTE_STRATEGY_OPTIONS = [
     "strict_priority",
@@ -1231,6 +1243,39 @@ def _resolve_local_api_base_url(cfg: GatewayConfig) -> str:
     return f"http://{host}:{cfg.server.port}"
 
 
+def _provider_category(provider_name: str) -> str:
+    return "Featured" if provider_name in FEATURED_PROVIDER_SET else "Other"
+
+
+def _sorted_provider_names(provider_names: list[str]) -> list[str]:
+    featured_index = {name: index for index, name in enumerate(FEATURED_PROVIDER_ORDER)}
+    return sorted(
+        provider_names,
+        key=lambda name: (
+            0 if name in FEATURED_PROVIDER_SET else 1,
+            featured_index.get(name, 999),
+            name,
+        ),
+    )
+
+
+def _print_provider_choices(provider_names: list[str]) -> list[str]:
+    ordered = _sorted_provider_names(provider_names)
+    groups = [
+        ("Featured providers", [name for name in ordered if name in FEATURED_PROVIDER_SET]),
+        ("Other providers", [name for name in ordered if name not in FEATURED_PROVIDER_SET]),
+    ]
+    index = 1
+    for title, items in groups:
+        if not items:
+            continue
+        console.print(title + ":")
+        for provider in items:
+            console.print(f"{index}) {provider}")
+            index += 1
+    return ordered
+
+
 def _current_master_api_key() -> str:
     created_env, generated_keys = _ensure_env_master_admin_keys()
     _print_env_setup_hint(created_env=created_env, generated_keys=generated_keys)
@@ -2031,10 +2076,7 @@ def _interactive_add_provider_key(config_path: str) -> None:
     if not isinstance(providers, dict) or not providers:
         raise typer.BadParameter("No providers configured. Add providers in config first.")
 
-    provider_names = sorted(str(name) for name in providers.keys())
-    console.print("Available providers:")
-    for idx, provider in enumerate(provider_names, start=1):
-        console.print(f"{idx}) {provider}")
+    provider_names = _print_provider_choices([str(name) for name in providers.keys()])
 
     raw_choice = typer.prompt("Select provider", default="1").strip()
     if not raw_choice.isdigit():
@@ -2043,6 +2085,15 @@ def _interactive_add_provider_key(config_path: str) -> None:
     if selected_index < 1 or selected_index > len(provider_names):
         raise typer.BadParameter("Selected provider index is out of range")
     provider = provider_names[selected_index - 1]
+    if provider == "cloudflare":
+        existing_account_id = str(providers.get(provider, {}).get("account_id", "") or "").strip()
+        account_id = typer.prompt(
+            "Cloudflare Account ID",
+            default=existing_account_id,
+        ).strip()
+        if not account_id:
+            raise typer.BadParameter("Cloudflare Account ID cannot be empty")
+        providers[provider]["account_id"] = account_id
 
     existing_keys = providers.get(provider, {}).get("keys", [])
     default_key_id = f"{provider}-key-{len(existing_keys) + 1}"
@@ -2154,8 +2205,16 @@ def doctor(config_path: str = typer.Option("config/config.yaml", help="Path to c
 @providers_app.command("list")
 def providers_list(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
     container = _container(config_path)
-    rows = container.admin_service.list_providers()
+    rows = sorted(
+        container.admin_service.list_providers(),
+        key=lambda row: (
+            0 if str(row["name"]) in FEATURED_PROVIDER_SET else 1,
+            FEATURED_PROVIDER_ORDER.index(str(row["name"])) if str(row["name"]) in FEATURED_PROVIDER_SET else 999,
+            str(row["name"]),
+        ),
+    )
     table = Table(title="Providers")
+    table.add_column("Category")
     table.add_column("Name")
     table.add_column("Enabled")
     table.add_column("Priority")
@@ -2163,6 +2222,7 @@ def providers_list(config_path: str = typer.Option("config/config.yaml", help="P
     table.add_column("Keys")
     for row in rows:
         table.add_row(
+            _provider_category(str(row["name"])),
             str(row["name"]),
             str(row["enabled"]),
             str(row["priority"]),
@@ -3203,10 +3263,10 @@ def _remove_custom_alias(config_path: str) -> None:
 
 def _select_provider_name(config_path: str) -> str:
     cfg = load_gateway_config(config_path=config_path)
-    provider_names = list(cfg.providers)
+    provider_names = _sorted_provider_names(list(cfg.providers))
     if not provider_names:
         raise typer.BadParameter("No providers configured")
-    _print_numbered_items("Providers", provider_names)
+    _print_provider_choices(provider_names)
     selected = _prompt_numbered_choice(len(provider_names), "Provider number")
     return provider_names[selected - 1]
 
@@ -3377,8 +3437,11 @@ def _show_provider_summary(config_path: str, provider_name: str) -> None:
     table = Table(title=f"Provider Settings: {provider_name}", box=box.ASCII)
     table.add_column("Setting")
     table.add_column("Value")
+    table.add_row("category", _provider_category(provider_name))
     table.add_row("enabled", str(provider.enabled))
     table.add_row("priority", str(provider.priority))
+    if provider.account_id:
+        table.add_row("account_id", str(provider.account_id))
     table.add_row("timeout_seconds", str(provider.timeout_seconds))
     table.add_row("keys", str(len(provider.keys)))
     console.print(table)

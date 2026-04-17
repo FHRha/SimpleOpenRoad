@@ -69,6 +69,35 @@ providers:
     timeout_seconds: 45
     keys: []
 
+  groq:
+    enabled: true
+    priority: 25
+    endpoint: https://api.groq.com/openai/v1
+    timeout_seconds: 45
+    keys: []
+
+  together:
+    enabled: true
+    priority: 27
+    endpoint: https://api.together.xyz/v1
+    timeout_seconds: 45
+    keys: []
+
+  cerebras:
+    enabled: true
+    priority: 28
+    endpoint: https://api.cerebras.ai/v1
+    timeout_seconds: 45
+    keys: []
+
+  cloudflare:
+    enabled: true
+    priority: 29
+    endpoint: https://api.cloudflare.com/client/v4
+    account_id: ""
+    timeout_seconds: 45
+    keys: []
+
   openrouter:
     enabled: true
     priority: 30

@@ -40,6 +40,10 @@ def _provider_label(provider: str | None) -> str:
         "openrouter": "OpenRouter",
         "github": "GitHub Models",
         "gemini": "Gemini",
+        "groq": "Groq",
+        "together": "Together AI",
+        "cerebras": "Cerebras Inference",
+        "cloudflare": "Cloudflare Workers AI",
     }
     return labels.get(provider, provider)
 
