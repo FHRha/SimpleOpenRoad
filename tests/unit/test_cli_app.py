@@ -15,6 +15,7 @@ from app.cli.app import cli_app
 from app.cli.app import _default_install_root
 from app.cli.app import _ensure_env_master_admin_keys
 from app.cli.app import _interactive_add_provider_key
+from app.cli.app import _model_alias_help_rows
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
 from app.cli.app import _select_test_alias
@@ -659,6 +660,7 @@ def test_select_test_alias_prefers_generated_aliases(monkeypatch, tmp_path: Path
                 {"alias_id": "auto/fast"},
                 {"alias_id": "auto/code"},
                 {"alias_id": "auto/free"},
+                {"alias_id": "auto/free-cheap"},
             ]
         },
     )
@@ -667,6 +669,26 @@ def test_select_test_alias_prefers_generated_aliases(monkeypatch, tmp_path: Path
     selected = _select_test_alias(str(config_path))
 
     assert selected == "auto/free"
+
+
+def test_model_alias_help_rows_include_free_cheap_description(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    cfg = load_gateway_config(str(config_path))
+
+    rows = dict(
+        _model_alias_help_rows(
+            cfg,
+            {
+                "generated_aliases": [
+                    {"alias_id": "auto/free-cheap"},
+                    {"alias_id": "auto/text/free-cheap"},
+                ]
+            },
+        )
+    )
+
+    assert rows["auto/free-cheap"] == "free models first, then lightweight paid fallback"
+    assert rows["auto/text/free-cheap"] == "canonical text alias for free-first with cheap fallback"
 
 
 def test_select_test_alias_refreshes_empty_inventory_before_prompt(monkeypatch, tmp_path: Path) -> None:

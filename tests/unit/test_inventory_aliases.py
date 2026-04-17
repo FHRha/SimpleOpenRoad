@@ -40,11 +40,10 @@ def test_inventory_aliases_build_provider_and_global_text_aliases() -> None:
         ),
         DiscoveredModel(
             provider="openrouter",
-            model_id="openai/gpt-5.3-codex-lite",
-            display_name="openai/gpt-5.3-codex-lite",
+            model_id="openai/gpt-5.4-nano",
+            display_name="openai/gpt-5.4-nano",
             modality="text",
             is_text_candidate=True,
-            tools_state="unsupported",
         ),
     ]
     classifications = [
@@ -76,12 +75,11 @@ def test_inventory_aliases_build_provider_and_global_text_aliases() -> None:
         ),
         ModelClassification(
             provider="openrouter",
-            model_id="openai/gpt-5.3-codex-lite",
+            model_id="openai/gpt-5.4-nano",
             modality="text",
-            code_score=90,
+            fast_score=30,
             general_score=20,
-            tool_disabled=True,
-            classification_tags=["code", "general", "tool_disabled"],
+            classification_tags=["fast", "general"],
         ),
     ]
     special_routes = [
@@ -100,14 +98,24 @@ def test_inventory_aliases_build_provider_and_global_text_aliases() -> None:
 
     assert "gemini/text/fast" in alias_map
     assert "openrouter/text/free" in alias_map
+    assert "openrouter/text/free-cheap" in alias_map
     assert "openrouter/text/code" in alias_map
     assert "auto/text/free" in alias_map
+    assert "auto/text/free-cheap" in alias_map
+    assert "auto/free-cheap" in alias_map
     assert "auto/text/fast" in alias_map
     assert "auto/code" in alias_map
 
     free_alias = alias_map["openrouter/text/free"]
     assert free_alias.candidates[0].candidate_type == "special_route"
     assert free_alias.candidates[0].model_id == "openrouter/free"
+
+    free_cheap_alias = alias_map["openrouter/text/free-cheap"]
+    assert [item.model_id for item in free_cheap_alias.candidates[:3]] == [
+        "openrouter/free",
+        "openai/gpt-5-mini:free",
+        "openai/gpt-5.4-nano",
+    ]
 
     code_alias = alias_map["openrouter/text/code"]
     assert code_alias.candidates[0].model_id == "openai/gpt-5.3-codex"

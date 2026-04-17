@@ -400,11 +400,13 @@ def _recommended_model_alias(cfg: GatewayConfig, snapshot: dict[str, Any] | None
 def _model_alias_help_rows(cfg: GatewayConfig, snapshot: dict[str, Any] | None = None) -> list[tuple[str, str]]:
     descriptions = {
         "auto/free": "free-capable routes only when available",
+        "auto/free-cheap": "free models first, then lightweight paid fallback",
         "auto/fast": "lightweight, cheap, low-latency tasks",
         "auto/general": "recommended default for general chat and everyday use",
         "auto/reasoning": "hard reasoning, long context, complex analysis",
         "auto/code": "coding, debugging, refactoring, repository work",
         "auto/text/free": "canonical text alias for free-capable routes",
+        "auto/text/free-cheap": "canonical text alias for free-first with cheap fallback",
         "auto/text/fast": "canonical text alias for lightweight tasks",
         "auto/text/general": "canonical text alias for general chat",
         "auto/text/reasoning": "canonical text alias for hard reasoning",
@@ -441,7 +443,7 @@ def _select_test_alias(config_path: str) -> str | None:
     generated_aliases = _generated_alias_ids(snapshot)
     alias_descriptions = dict(_model_alias_help_rows(cfg, snapshot))
 
-    preferred_aliases = ("auto/fast", "auto/free", "auto/general", "auto/reasoning", "auto/code")
+    preferred_aliases = ("auto/fast", "auto/free", "auto/free-cheap", "auto/general", "auto/reasoning", "auto/code")
     alias_options: list[str] = []
     seen: set[str] = set()
     for alias in preferred_aliases:

@@ -350,6 +350,45 @@ def test_generated_free_alias_never_upgrades_to_paid_reasoning_for_complex_reque
     assert [candidate.model for candidate in candidates] == ["openrouter/free"]
 
 
+def test_generated_free_cheap_alias_uses_free_then_fast_fallback() -> None:
+    cfg = _adaptive_config()
+    generated_aliases = [
+        GeneratedAlias(
+            alias_id="auto/text/free",
+            scope="global",
+            modality="text",
+            category="free",
+            candidates=[GeneratedAliasCandidate(provider="openrouter", model_id="openrouter/free")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/text/fast",
+            scope="global",
+            modality="text",
+            category="fast",
+            candidates=[GeneratedAliasCandidate(provider="github", model_id="gpt-4.1-mini")],
+        ),
+        GeneratedAlias(
+            alias_id="auto/free-cheap",
+            scope="compat",
+            modality="text",
+            category="free-cheap",
+            candidates=[
+                GeneratedAliasCandidate(provider="openrouter", model_id="openrouter/free"),
+                GeneratedAliasCandidate(provider="github", model_id="gpt-4.1-mini"),
+            ],
+        ),
+    ]
+    request = UnifiedLLMRequest(
+        model="auto/free-cheap",
+        messages=[ChatMessage(role="user", content="hello")],
+    )
+
+    candidates, alias = plan_candidates(cfg, request, generated_aliases=generated_aliases)
+
+    assert alias == "auto/free-cheap"
+    assert [candidate.model for candidate in candidates] == ["openrouter/free", "gpt-4.1-mini"]
+
+
 def test_missing_generated_alias_is_not_treated_as_direct_provider_model() -> None:
     cfg = _adaptive_config()
     request = UnifiedLLMRequest(

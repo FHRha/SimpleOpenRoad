@@ -17,7 +17,7 @@ from app.router.request_analyzer import (
 )
 
 GENERATED_TEXT_ALIAS_PREFIX = "auto/text/"
-COMPAT_TEXT_ALIASES = {"auto/free", "auto/fast", "auto/general", "auto/reasoning", "auto/code"}
+COMPAT_TEXT_ALIASES = {"auto/free", "auto/free-cheap", "auto/fast", "auto/general", "auto/reasoning", "auto/code"}
 
 PROFILE_SCORE: dict[TaskProfile, dict[TaskProfile, int]] = {
     "fast": {"fast": 100, "balanced": 70, "code": 45, "strong": 30},
@@ -87,6 +87,8 @@ def plan_candidates(
     generated_alias = _generated_alias_by_id(generated_aliases or [], alias)
     if generated_alias is not None and _is_adaptive_generated_alias(generated_alias):
         candidates = _adaptive_generated_candidates(generated_aliases or [], generated_alias, analysis) or candidates
+        if generated_alias.category == "free-cheap":
+            return candidates, alias
         profile = analysis.profile
         if profile == "code" and _request_uses_tools(request):
             tool_capable = [candidate for candidate in candidates if candidate_supports_tools(config, candidate)]
@@ -151,6 +153,8 @@ def _category_fallbacks(
 ) -> list[str]:
     if requested_category == "free":
         return ["free"]
+    if requested_category == "free-cheap":
+        return ["free", "fast"]
     if requested_category == "reasoning":
         if intent == "trivial":
             return ["fast", "general", "reasoning"]

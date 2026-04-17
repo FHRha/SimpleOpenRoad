@@ -13,11 +13,12 @@ from app.inventory.models import (
     ProviderSpecialRoute,
 )
 
-TEXT_CATEGORIES = ("free", "fast", "general", "reasoning", "code")
+TEXT_CATEGORIES = ("free", "free-cheap", "fast", "general", "reasoning", "code")
 MEDIA_MODALITIES = ("image", "video", "audio")
 MEDIA_DEFAULT_CATEGORY = "default"
 COMPAT_ALIAS_MAP = {
     "auto/free": "auto/text/free",
+    "auto/free-cheap": "auto/text/free-cheap",
     "auto/fast": "auto/text/fast",
     "auto/general": "auto/text/general",
     "auto/reasoning": "auto/text/reasoning",
@@ -167,9 +168,9 @@ def _build_provider_candidates(
     special_routes: list[ProviderSpecialRoute],
 ) -> list[GeneratedAliasCandidate]:
     candidates: list[GeneratedAliasCandidate] = []
-    if category == "free":
+    if category in {"free", "free-cheap"}:
         for route in special_routes:
-            if category in route.category_hints and route.modality == "text":
+            if "free" in route.category_hints and route.modality == "text":
                 candidates.append(
                     GeneratedAliasCandidate(
                         provider=provider,
@@ -187,6 +188,24 @@ def _build_provider_candidates(
         ),
         reverse=True,
     )
+    if category == "free-cheap":
+        free_models: list[GeneratedAliasCandidate] = []
+        cheap_models: list[GeneratedAliasCandidate] = []
+        for model in ranked:
+            classification = class_map[(model.provider, model.model_id)]
+            candidate = GeneratedAliasCandidate(
+                provider=model.provider,
+                model_id=model.model_id,
+                candidate_type="model",
+            )
+            if classification.free_score > 0:
+                free_models.append(candidate)
+            elif classification.fast_score > 0:
+                cheap_models.append(candidate)
+        candidates.extend(free_models)
+        candidates.extend(cheap_models)
+        return _dedupe_candidates(candidates)
+
     for model in ranked:
         classification = class_map[(model.provider, model.model_id)]
         if not _model_matches_category(category, classification):
@@ -204,6 +223,8 @@ def _build_provider_candidates(
 def _model_matches_category(category: str, classification: ModelClassification) -> bool:
     if category == "free":
         return classification.free_score > 0
+    if category == "free-cheap":
+        return classification.free_score > 0 or classification.fast_score > 0
     if category == "fast":
         return classification.fast_score > 0
     if category == "general":
@@ -222,6 +243,7 @@ def _category_sort_key(
 ) -> tuple[int, int, int, int]:
     primary = {
         "free": classification.free_score,
+        "free-cheap": max(classification.free_score, classification.fast_score),
         "fast": classification.fast_score,
         "general": classification.general_score,
         "reasoning": classification.reasoning_score,
@@ -240,7 +262,7 @@ def _capability_bonus(category: str, model: DiscoveredModel, classification: Mod
         if model.tools_state == "unknown":
             return 1
         return 0
-    if category in {"fast", "general", "reasoning"}:
+    if category in {"free-cheap", "fast", "general", "reasoning"}:
         bonus = 0
         bonus += 1 if model.chat_state == "supported" else 0
         bonus += 1 if model.responses_state == "supported" else 0
