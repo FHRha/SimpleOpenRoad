@@ -1,62 +1,132 @@
 # Troubleshooting
 
-## Server returns 401 for user endpoints
+Use the terminal panel first when possible:
+
+```bash
+sor
+```
+
+Most routing issues can be narrowed down with these commands. For the routing model behind these diagnostics, see [Routing and Model Selection](ROUTING.md).
+
+```bash
+sor providers test
+sor providers inventory --refresh
+sor providers consistency
+sor routes preview --model auto/general
+```
+
+## User endpoints return 401
+
 - Check `MASTER_API_KEY` in `.env`.
-- Pass `x-api-key` header or `Authorization: Bearer ...`.
-- Confirm `security.require_master_key` in `config/config.yaml`.
+- Pass `x-api-key: <MASTER_API_KEY>` or `Authorization: Bearer <MASTER_API_KEY>`.
+- Confirm `security.require_master_key`.
 
-## Server returns 401 for admin endpoints
+## Admin endpoints return 401
+
 - Check `ADMIN_API_KEY` in `.env`.
-- Pass `x-admin-key` header or bearer token.
+- Pass `x-admin-key: <ADMIN_API_KEY>` or `Authorization: Bearer <ADMIN_API_KEY>`.
+- Confirm `security.require_admin_key`.
 
-## Provider key is always invalid
+## Provider key is invalid
+
 - Run `sor keys validate --provider <name> --key-id <id>`.
-- Check endpoint URL for provider config.
-- Check quota and account restrictions.
+- Check the provider endpoint URL.
+- Check provider quota, billing, and account restrictions.
+- For Cloudflare Workers AI, check the key-level or provider-level `account_id`.
+
+## Cloudflare returns auth errors or HTTP 400
+
+- Cloudflare Workers AI URLs require the correct account ID.
+- Prefer key-level `account_id` when using multiple Cloudflare accounts.
+- Run `sor providers inventory --refresh`.
+- Confirm discovered model IDs look like `@cf/...`, not UUIDs.
+- Run `sor providers consistency` to compare key health and inventory state.
+
+## Together returns HTTP 402
+
+Together `402` usually means billing, credits, or model access is unavailable for that account.
+
+What to do:
+
+- Use `auto/general` or `auto/fast` and let model quarantine skip repeatedly failing models.
+- If specific families always fail, add a model quarantine override such as `provider: together`, `model_pattern: "nvidia/*"`.
+- Check whether the account has credits for the selected model.
+
+`auto/free-cheap` is only generated when a provider has real free candidates. Paid-only Together models should not create that alias.
 
 ## Route switching is not happening as expected
-- Verify `routing.error_policy` in config.
-- Check key runtime status (`sor keys list`) for cooldown/blocking.
+
+- Check `routing.error_policy`.
+- Check key runtime status with `sor keys list`.
 - Confirm effective candidate order with `sor routes preview`.
-- Check `Route memory` in Route Preview. A `hit` only reorders candidates; fallback still continues if that model fails.
-- `ignored_direct` means the request used a direct model instead of an alias, so route memory is intentionally not used.
-- If old placeholder keys appear, run `sor keys list --all` and clean them from the panel with `sor` -> option `9`.
+- Check `Route memory`: a `hit` only reorders candidates; fallback still continues if that model fails.
+- Check for `model_quarantined`: quarantined models are skipped before provider calls.
 
 ## No route candidates available
+
 - At least one provider must be `enabled: true`.
-- At least one key must be active and not in cooldown.
-- Verify route aliases point to existing providers/models.
-- Placeholder values like `${GEMINI_API_KEY_MAIN}` are ignored by routing; add real provider keys with `sor keys wizard`.
-- Run `sor routes preview` for the same alias/model and inspect:
-- `Request Route Analysis`: detected intent, profile, token estimate, and reasons.
-- `Effective Candidate Order`: final order after adaptive routing, context filtering, and route memory.
-- `Candidate preview`: full non-truncated status/reason for each candidate.
+- At least one real key must be configured and active.
+- Placeholder values like `${GEMINI_API_KEY_MAIN}` are ignored.
+- Refresh inventory: `sor providers inventory --refresh`.
+- Preview the route: `sor routes preview --model <alias>`.
 
 ## Candidate skipped with `context_too_large`
-- The model has a known context limit from provider inventory and the request estimate is larger.
-- Route Preview shows the comparison as `token_estimate > max_context_tokens`.
-- Use an alias with larger-context models, reduce prompt/history size, or refresh inventory if provider metadata changed.
-- Unknown context limits are not filtered; SOR only skips when a limit is known.
+
+- The request estimate is larger than the model's known context limit.
+- Use a larger-context alias/model.
+- Reduce prompt/history size.
+- Refresh inventory if provider metadata changed.
+
+## Candidate skipped with `model_quarantined`
+
+The same `provider/model` failed repeatedly and is temporarily skipped.
+
+Defaults:
+
+- Threshold: 3 consecutive failures.
+- `rate_limit`: 30 minutes.
+- `unsupported_model`: 24 hours.
+- `malformed_response`: 6 hours.
+
+Change or reset from:
+
+```text
+sor -> Settings -> Model quarantine settings
+```
 
 ## Unexpected weak or strong model selection
-- Check `Request Route Analysis` first. Short prompts can still be classified as planning, analysis, code, or critical.
-- `auto/reasoning` can use fast/general models only for trivial smoke-test prompts.
-- `auto/free` stays inside free/special free routes and does not silently upgrade to paid candidates.
-- Direct model requests bypass adaptive bucket switching. Use `provider/model` when you need an exact model.
+
+- Check `Request Route Analysis` in route preview or automatic test output.
+- Short prompts usually route to `fast`.
+- `auto/reasoning` can still use fast/general models for trivial smoke-test prompts.
+- Direct `provider/model` requests bypass adaptive bucket switching.
 
 ## Route memory looks wrong
-- `miss`: no remembered model for the current alias/profile/context bucket.
-- `hit`: remembered model is still valid and was moved to the front.
-- `stale`: remembered model is no longer in the current candidate list and is ignored.
-- `ignored_direct`: direct model request; memory is not used.
-- Route memory is keyed by `alias + profile + context_bucket`, so a model remembered for a small fast request is not reused for a large reasoning request.
+
+Statuses:
+
+- `miss`: no remembered model for this alias/profile/context bucket.
+- `hit`: remembered model is valid and moved forward.
+- `stale`: remembered model is no longer in the candidate list.
+- `ignored_direct`: direct model request; route memory does not apply.
+
+Route memory is keyed by:
+
+```text
+alias + profile + context_bucket
+```
 
 ## Config reload fails
-- Run `sor config validate` first.
-- Check YAML syntax and duplicate key IDs.
+
+- Run `sor config validate`.
+- Check YAML indentation.
+- Check duplicate key IDs.
 - Ensure env variables referenced as `${VAR}` are set.
 
 ## High latency
+
 - Reduce provider timeout values.
-- Tune retry settings (`backoff_base_ms`, `max_attempts_per_candidate`).
-- Reorder alias candidates to favor low-latency models.
+- Tune retry settings.
+- Lower `routing.retry.max_attempts_per_candidate`.
+- Let model quarantine skip repeated failures.
+- Prefer `auto/fast` for simple prompts.

@@ -1,5 +1,7 @@
 # Release Process
 
+For install and update commands shown to users, keep [README](../README.md), [Deployment](DEPLOYMENT.md), and [Admin Guide](ADMIN_GUIDE.md) aligned with this page.
+
 ## Goal
 
 Build and publish a Linux release archive that can be installed with the root installer script.
@@ -73,7 +75,7 @@ Override repository (for forks):
 Interactive terminal:
 
 - sor
-- choose `10) Update SimpleOpenRoad`
+- choose `Service` -> `Update SimpleOpenRoad`
 
 CLI:
 

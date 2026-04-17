@@ -1,133 +1,104 @@
-# AI Gateway Router — Proposed Project Structure
+# Project Structure
+
+This page is a maintainer-oriented map of the repository. For runtime behavior, see [Architecture](ARCHITECTURE.md) and [Routing and Model Selection](ROUTING.md).
 
 ```text
 SimpleOpenRoad/
   app/
-    __init__.py
-    main.py
-
-    api/
-      __init__.py
-      deps.py
-      middleware.py
-      routes_public.py
-      routes_admin.py
-      schemas_openai.py
-      schemas_admin.py
-
-    cli/
-      __init__.py
-      app.py
-      commands_init.py
-      commands_start.py
-      commands_doctor.py
-      commands_providers.py
-      commands_keys.py
-      commands_routes.py
-      commands_config.py
-      commands_logs.py
-      commands_stats.py
-      commands_health.py
-      commands_menu.py
-
-    config/
-      __init__.py
-      loader.py
-      models.py
-      runtime.py
-
-    core/
-      __init__.py
-      types.py
-      errors.py
-      constants.py
-      security.py
-      utils.py
-
-    providers/
-      __init__.py
-      base.py
-      registry.py
-      openai_compatible.py
-      gemini.py
-      github_models.py
-      openrouter.py
-
-    router/
-      __init__.py
-      engine.py
-      selector.py
-      alias_resolver.py
-      policy.py
-      classifier.py
-      backoff.py
-
-    registry/
-      __init__.py
-      keys.py
-      providers.py
-
-    health/
-      __init__.py
-      checker.py
-      scheduler.py
-
-    storage/
-      __init__.py
-      db.py
-      schema.sql
-      repositories/
-        __init__.py
-        keys_repo.py
-        health_repo.py
-        attempts_repo.py
-        stats_repo.py
-
-    observability/
-      __init__.py
-      logging.py
-      metrics.py
-
-    services/
-      __init__.py
-      gateway_service.py
-      admin_service.py
+    api/              FastAPI routes, auth dependencies, OpenAI-compatible schemas.
+    cli/              Typer commands and interactive terminal panel.
+    config/           Pydantic config models, YAML/env loading, reload support.
+    core/             Shared constants, errors, security helpers, utility types.
+    health/           Provider/key validation and health-check orchestration.
+    inventory/        Provider model discovery, classification, alias generation.
+    observability/    Structured logging and metrics helpers.
+    providers/        Provider adapters and shared OpenAI-compatible transport.
+    registry/         Provider/key registry abstractions.
+    router/           Alias resolution, request analysis, selection, failover.
+    services/         Orchestration used by API and CLI.
+    storage/          SQLite schema, connection helpers, repositories.
 
   config/
     config.example.yaml
 
-  tests/
-    __init__.py
-    unit/
-      test_config_loader.py
-      test_error_classifier.py
-      test_selector.py
-      test_alias_resolver.py
-    integration/
-      test_api_chat.py
-      test_api_responses.py
-      test_failover_flow.py
-      test_cli_commands.py
-    fixtures/
-      sample_config.yaml
+  docs/
+    README-linked user and operator documentation.
+    internal/         Historical plans, triage notes, and implementation notes.
 
   scripts/
-    bootstrap.py
+    Build, install, and release helper scripts.
 
-  docs/
-    REQUIREMENTS.md
-    ARCHITECTURE.md
-    IMPLEMENTATION_PLAN.md
-    PROJECT_STRUCTURE.md
+  tests/
+    fixtures/
+    integration/
+    unit/
 
   .env.example
-  .gitignore
+  install.sh
   pyproject.toml
   README.md
 ```
 
-Notes:
-- `services/` is the orchestration layer used by both API and CLI.
-- `providers/` and `router/` are isolated and independently testable.
-- `storage/` keeps SQLite concerns away from domain logic.
-- `observability/` can be reused later by a web dashboard.
+## Provider Adapters
+
+Provider-specific code lives in `app/providers/`.
+
+| File | Purpose |
+|---|---|
+| `openai_compatible.py` | Shared transport for providers with OpenAI-style APIs. |
+| `gemini.py` | Gemini request/response translation. |
+| `github_models.py` | GitHub Models catalog and chat adapter. |
+| `groq.py` | Groq OpenAI-compatible adapter. |
+| `cloudflare_workers_ai.py` | Cloudflare Workers AI adapter with account-scoped requests. |
+| `openrouter.py` | OpenRouter adapter and free-route handling. |
+| `together.py` | Together AI adapter and catalog normalization. |
+| `cerebras.py` | Cerebras OpenAI-compatible adapter. |
+| `registry.py` | Provider adapter registration. |
+
+## Routing and Inventory
+
+Routing and inventory are intentionally separate.
+
+| Area | Main Files | Responsibility |
+|---|---|---|
+| Inventory | `app/inventory/*` | Discover provider models, normalize metadata, classify models, build generated aliases. |
+| Routing | `app/router/*` | Resolve requested model, analyze request shape, order candidates, apply route memory, retries, failover, and quarantine. |
+| Runtime state | `app/storage/repositories/*` | Persist key state, attempts, usage stats, route memory, and model quarantine. |
+
+Generated aliases such as `auto/fast` and `auto/general` come from inventory. Runtime decisions such as skipping a quarantined model happen in the router.
+
+## Storage
+
+SQLite is the local runtime store. The schema is in `app/storage/schema.sql`.
+
+Important repository files:
+
+| Repository | Stores |
+|---|---|
+| `keys_repo.py` | Key runtime state, cooldowns, health status. |
+| `health_repo.py` | Health-check history. |
+| `attempts_repo.py` | Request attempt diagnostics. |
+| `stats_repo.py` | Usage and latency aggregates. |
+| `route_memory_repo.py` | Successful model memory per alias/profile/context bucket. |
+| `model_runtime_repo.py` | Model failure counters and quarantine windows. |
+
+## Documentation Layout
+
+Public/user docs:
+
+- [README](../README.md)
+- [Getting Started](GETTING_STARTED.md)
+- [Providers](PROVIDERS.md)
+- [Routing and Model Selection](ROUTING.md)
+- [Config Reference](CONFIG_REFERENCE.md)
+- [Admin Guide](ADMIN_GUIDE.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
+
+Maintainer docs:
+
+- [Architecture](ARCHITECTURE.md)
+- [Project Structure](PROJECT_STRUCTURE.md)
+- [Test Plan](TEST_PLAN.md)
+- [Release Process](RELEASE.md)
+
+Historical and implementation notes belong under `docs/internal/`.

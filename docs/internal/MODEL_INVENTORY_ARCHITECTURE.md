@@ -749,7 +749,7 @@ This architecture document is the source for the system design.
 
 Provider-specific model notes and observed catalog rules should live in a separate companion document:
 
-- `docs/PROVIDER_MODEL_NOTES.md`
+- `docs/internal/PROVIDER_MODEL_NOTES.md`
 
 That companion file should contain:
 

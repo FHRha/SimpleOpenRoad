@@ -1,4 +1,8 @@
-# AI Gateway Router — Architecture Proposal
+# SimpleOpenRoad Architecture
+
+This is the technical architecture overview for maintainers. For user-facing setup and operations, see [Getting Started](GETTING_STARTED.md), [Providers](PROVIDERS.md), [Routing and Model Selection](ROUTING.md), and [Config Reference](CONFIG_REFERENCE.md).
+
+For repository layout, see [Project Structure](PROJECT_STRUCTURE.md). For verification scope, see [Test Plan](TEST_PLAN.md).
 
 ## 1. Stack Choice and Rationale
 
@@ -10,7 +14,7 @@ Why this stack:
 - Typer gives a clear and productive CLI UX.
 - HTTPX supports robust async HTTP with timeout/retry control.
 - SQLite is simple, local, durable, and ideal for self-hosted VPS scenarios.
-- Python implementation cost is lower for a feature-rich MVP with clean architecture.
+- Python keeps implementation cost low for a feature-rich gateway while preserving a clean, testable architecture.
 
 Trade-off:
 - Node.js/TypeScript could provide stronger compile-time typing for some teams.
@@ -18,7 +22,7 @@ Trade-off:
 
 ## 2. System Context
 
-Client tools (Cline/Continue/scripts) call the gateway's OpenAI-style endpoints.
+Client tools, coding agents, scripts, and OpenAI-compatible applications call the gateway's OpenAI-style endpoints.
 Gateway resolves route policy -> selects provider+key -> forwards request -> normalizes response.
 On failure, gateway applies retry/fallback policies and emits structured diagnostics.
 
@@ -39,7 +43,11 @@ On failure, gateway applies retry/fallback policies and emits structured diagnos
 - Concrete adapters:
   - Gemini
   - GitHub Models (OpenAI-compatible transport)
+  - Groq (OpenAI-compatible transport)
+  - Cloudflare Workers AI
   - OpenRouter (OpenAI-compatible transport)
+  - Together AI (OpenAI-compatible transport)
+  - Cerebras (OpenAI-compatible transport)
 - Converts internal request/response into provider-specific payloads.
 
 4. Key Registry + Runtime State (`app/registry`, `app/state`)
@@ -52,21 +60,26 @@ On failure, gateway applies retry/fallback policies and emits structured diagnos
 - Scheduled background checks.
 - Provider-specific checks via adapter contract.
 
-6. Config Subsystem (`app/config`)
+6. Model Inventory and Alias Generation (`app/inventory`)
+- Discovers models, modalities, context windows, pricing hints, and tool support.
+- Builds generated aliases such as `auto/fast`, `auto/general`, `auto/code`, and media aliases.
+- Stores provider/key-scoped model availability so routing does not call keys that cannot serve a discovered model.
+
+7. Config Subsystem (`app/config`)
 - Loads `.env` + `config.yaml`.
 - Validates with Pydantic models.
 - Supports reload through admin endpoint and CLI.
 
-7. Storage Layer (`app/storage`)
+8. Storage Layer (`app/storage`)
 - SQLite repositories for keys/health/stats/events.
 - Small normalized schema + append-only events for diagnostics.
 
-8. Observability (`app/observability`)
+9. Observability (`app/observability`)
 - Structured JSON logging.
 - Router/failover event logging.
 - Metrics and stats service (DB-backed aggregates).
 
-9. CLI Layer (`app/cli`)
+10. CLI Layer (`app/cli`)
 - Admin operations for keys/providers/routes/config/health/stats.
 - Interactive helper for common setup actions.
 
@@ -82,7 +95,14 @@ On failure, gateway applies retry/fallback policies and emits structured diagnos
 7. On failure: classify error -> retry/fallback decision -> next attempt.
 8. If all candidates fail: return normalized gateway error with trace ID.
 
-### 4.2 Health Flow
+### 4.2 Inventory Flow
+1. CLI, scheduler, or admin action requests inventory refresh.
+2. Provider adapter lists models for each valid key.
+3. Inventory normalizes model IDs, capabilities, modalities, pricing hints, context limits, and source key IDs.
+4. Alias generator builds generated `auto/*` routes from normalized inventory.
+5. Router uses generated aliases and source key IDs during candidate filtering.
+
+### 4.3 Health Flow
 1. Scheduler triggers periodic checks per key.
 2. Adapter-specific `validate_key` runs lightweight probe.
 3. Status and model availability persisted.
@@ -100,7 +120,7 @@ Core methods:
 - `normalize_error(provider_response)`
 
 ### 5.2 Shared OpenAI-Compatible Adapter Base
-- Handles providers with OpenAI-like APIs (GitHub Models, OpenRouter).
+- Handles providers with OpenAI-like APIs, including GitHub Models, Groq, OpenRouter, Together AI, and Cerebras.
 - Shared serialization, auth headers, stream handling.
 
 ### 5.3 Gemini Adapter
@@ -118,15 +138,19 @@ Core methods:
 ### 6.2 Decision Layers
 1. Alias resolver: `auto/*` -> ordered candidate models.
 2. Candidate filter: remove inactive/blocked/cooldown keys.
-3. Key selection strategy (MVP: strict priority).
-4. Retry policy per classified error.
-5. Fallback policy key -> provider.
+3. Context filter: remove models with known context smaller than the request estimate.
+4. Model quarantine filter: remove temporarily quarantined `provider/model` pairs.
+5. Route memory: move recently successful candidates forward for the same alias/profile/context bucket.
+6. Key selection strategy.
+7. Retry policy per classified error.
+8. Fallback policy key -> provider.
 
-### 6.3 MVP Policy Behavior
-- Select top-priority healthy key for first candidate.
+### 6.3 Current Policy Behavior
+- Select top-priority eligible key for first candidate.
 - Retry on transient errors (timeout, 429, 5xx) up to policy limits.
 - If key exhausted or non-retriable error: move to next key.
 - If provider keys exhausted: move to next provider candidate.
+- If a model repeatedly fails, record runtime failure state and skip it until quarantine TTL expires.
 
 ## 7. Key Registry Design
 
@@ -164,7 +188,7 @@ Schedules:
 ### 9.1 Config Sources
 1. `.env` for secrets and environment defaults
 2. `config/config.yaml` as canonical declarative config
-3. SQLite for runtime state/statistics and mutable key state
+3. SQLite for runtime state/statistics, mutable key state, route memory, inventory, and model quarantine state
 
 ### 9.2 Merge Policy
 - File config is source of truth for static topology.
@@ -177,21 +201,24 @@ Schedules:
 - Admin endpoints via separate `X-Admin-Key`.
 - Secrets masked in logs and serialized outputs.
 - CLI never prints full secret keys.
+- Cloudflare account IDs can be stored per key so multiple Cloudflare accounts can coexist.
 - Optional bind to localhost and reverse proxy TLS in production.
 
-## 11. API Surface (MVP)
+## 11. API Surface
 
 User endpoints:
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
 - `GET /health`
 - `GET /providers`
+- `GET /v1/models`
 
 Admin endpoints:
 - `GET /keys`
 - `POST /admin/validate-key`
 - `POST /admin/reload-config`
 - `GET /admin/stats`
+- `GET /admin/health`
 
 ## 12. CLI Architecture
 
@@ -199,14 +226,17 @@ Command groups:
 - `sor init`
 - `sor start`
 - `sor doctor`
-- `sor providers list|test`
+- `sor providers list|test|inventory|consistency`
 - `sor keys list|add|remove|enable|disable|validate`
-- `sor routes list|set-priority`
+- `sor routes list|preview|set-priority`
 - `sor config validate|reload`
 - `sor logs tail`
 - `sor stats`
 - `sor health`
-- `sor menu` (interactive)
+- `sor update`
+- `sor uninstall`
+- `sor service install|start|stop|restart|status|logs|uninstall`
+- `sor panel` or `sor menu` for the interactive terminal panel
 
 CLI interacts with:
 - local config files
@@ -252,7 +282,7 @@ Error classes:
 - `UNSUPPORTED_MODEL`
 - `UNKNOWN`
 
-Decision defaults (MVP):
+Default decisions:
 - `AUTH_INVALID`: mark key invalid, no same-key retry, next key/provider
 - `AUTH_FORBIDDEN`: degrade key, no same-key retry
 - `RATE_LIMIT`: apply cooldown, retry same key once then next key
@@ -260,6 +290,8 @@ Decision defaults (MVP):
 - `NETWORK_TIMEOUT`: retry same key with short backoff
 - `MALFORMED_RESPONSE`: retry once then switch provider
 - `UNSUPPORTED_MODEL`: immediate next route candidate/provider
+
+Model quarantine is applied separately from key cooldown. Auth failures affect key state; repeated model-level failures affect `provider/model` quarantine state.
 
 ## 15. Extensibility Considerations
 

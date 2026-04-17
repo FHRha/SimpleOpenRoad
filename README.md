@@ -1,43 +1,55 @@
 # SimpleOpenRoad
 
-SimpleOpenRoad is a self-hosted AI gateway that gives your team one stable OpenAI-style endpoint while routing traffic across multiple providers and keys.
+Self-hosted OpenAI-compatible AI gateway with automatic routing, provider failover, multi-key management, generated model aliases, inventory refresh, diagnostics, and runtime quarantine for broken models.
 
-Use it when you want your applications to keep working even if one model, one provider, or one API key starts failing.
+Run one stable `/v1` endpoint for your apps and coding agents while SimpleOpenRoad routes requests across providers such as Gemini, GitHub Models, Groq, Cloudflare Workers AI, OpenRouter, Together AI, and Cerebras.
 
-## Why teams pick it
+## Why Use It
 
-- One endpoint for all apps and agents.
-- Automatic fallback between keys and providers.
-- OpenAI-compatible API, so existing clients keep working.
-- Centralized operations: health checks, stats, validation, and admin commands.
-- Lightweight stack that runs well on a small VPS.
+SimpleOpenRoad is useful when your tools expect an OpenAI-compatible API, but you do not want to depend on one provider, one key, or one model.
 
-## What you get
+It helps with:
 
-- Unified endpoints for chat and responses.
-- Provider adapters for Gemini, GitHub Models, and OpenRouter.
-- Multi-key registry with runtime state and cooldown logic.
-- Error-aware retry and failover policy.
-- CLI and admin API for day-to-day operations.
-- Terminal panel via `sor` or `sor panel`; web operations via `/docs` and admin API endpoints.
+- Provider outages: switch to another provider when a request fails.
+- Rate limits and bad keys: track key state, cooldowns, and failover.
+- Unstable models: quarantine models that repeatedly fail instead of retrying them every request.
+- Agent clients: accept OpenAI-style chat payloads, streaming, tools, and Cline-like requests.
+- Operations: validate keys, refresh model inventory, preview routes, inspect diagnostics, and manage everything from a terminal panel.
 
-## Install
+## Feature Highlights
 
-### Option A: one-line install from GitHub release (Linux)
+| Area | What SimpleOpenRoad Does |
+|---|---|
+| OpenAI-compatible API | Exposes `/v1/chat/completions`, `/v1/responses`, `/v1/models`-style usage for compatible clients. |
+| Generated aliases | Builds aliases such as `auto/fast`, `auto/general`, `auto/code`, and media aliases from live provider inventory. |
+| Multi-provider routing | Routes across configured providers and keys using priority, adaptive profiles, retries, and fallback policy. |
+| Key lifecycle | Tracks key health, runtime status, cooldowns, failures, successes, and latency. |
+| Model quarantine | Temporarily skips models that repeatedly fail, with configurable TTLs and provider/model overrides. |
+| Inventory refresh | Discovers provider models, capabilities, modalities, context sizes, and generated aliases. |
+| Terminal operations | `sor` opens an interactive management panel for setup, validation, testing, routing, and service operations. |
+
+## Quick Start
+
+### Linux Release Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash
 ```
 
-Install a specific version:
+Then open the terminal panel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/FHRha/SimpleOpenRoad/main/install.sh | bash -s -- --version v0.1.0
+sor
 ```
 
-Installer selects release archive automatically by CPU architecture (`x86_64`/`arm64`).
+Recommended first path:
 
-### Option B: local source setup
+```text
+Providers and keys -> Add provider key
+Gateway -> API access token and test
+```
+
+### Source Install
 
 ```bash
 python -m venv .venv
@@ -48,23 +60,34 @@ cp config/config.example.yaml config/config.yaml
 sor start --config-path config/config.yaml
 ```
 
-## First request
+On Windows PowerShell:
 
-The installer generates `MASTER_API_KEY` in `.env`. You can view it or run an automatic API test from the terminal panel with `sor` -> `Gateway` -> `API access token and test`.
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+Copy-Item .env.example .env
+Copy-Item config\config.example.yaml config\config.yaml
+sor start --config-path config/config.yaml
+```
 
-For OpenAI-compatible plugins and clients, use:
+## First Client Configuration
+
+Use these settings in OpenAI-compatible clients, coding agents, and local tools. See [Getting Started](docs/GETTING_STARTED.md) for the full first-run flow.
 
 ```text
 Base URL: http://<SERVER_IP>:12345/v1
-API Key: <MASTER_API_KEY>
-Model: auto/general
+API Key:  <MASTER_API_KEY>
+Model:    auto/general
 ```
 
-Use `auto/general` as the default model name in plugins. Built-in aliases are generated from the models currently available on your configured providers. Use `auto/fast` when you explicitly want lightweight models only, `auto/reasoning` for harder reasoning, `auto/code` for coding tasks, and `auto/free` when a free-capable route is available.
+`MASTER_API_KEY` is stored in `.env`. The terminal panel can show or regenerate it:
 
-The OpenAI-compatible gateway accepts both simple requests and agent-style payloads. Plain `curl` chat calls with string `messages[].content` work, and so do richer OpenAI-style payloads with structured content parts, `tools`, `tool_choice`, `stream_options`, `reasoning_effort`, and `/v1/responses` requests with `instructions`.
+```text
+sor -> Gateway -> API access token and test
+```
 
-You can also request a direct model. Use `provider/model` to force one provider, for example `openrouter/openai/gpt-5.4-mini`, or use an exact model id such as `gpt-5.4-mini` to try that same model id across your configured providers.
+## Example Request
 
 ```bash
 MASTER_API_KEY="$(grep '^MASTER_API_KEY=' .env | cut -d= -f2-)"
@@ -74,45 +97,137 @@ curl -sS -X POST "http://127.0.0.1:12345/v1/chat/completions" \
   -H "x-api-key: ${MASTER_API_KEY}" \
   --data-binary @- <<'JSON'
 {
-    "model": "auto/fast",
-    "messages": [{"role": "user", "content": "Hello"}]
+  "model": "auto/fast",
+  "messages": [
+    {"role": "user", "content": "Hello"}
+  ]
 }
 JSON
 ```
 
-To fully remove an installed server package:
+## Model Aliases
+
+Generated aliases are built from the current provider inventory and available keys. See [Routing and Model Selection](docs/ROUTING.md) for adaptive routing, route memory, free-route behavior, and model quarantine.
+
+| Alias | Use For |
+|---|---|
+| `auto/fast` | Lightweight, cheap, low-latency requests. |
+| `auto/general` | Default everyday chat and general tasks. |
+| `auto/reasoning` | Harder reasoning, analysis, and long-context work. |
+| `auto/code` | Coding, debugging, refactoring, and repository work. |
+| `auto/free` | Strict free-only route when free-capable models exist. |
+| `auto/free-cheap` | Free-first route with cheap fallback only when a free candidate exists. |
+| `auto/image/default` | Image-capable models discovered in inventory. |
+| `auto/audio/default` | Audio-capable models discovered in inventory. |
+| `auto/video/default` | Video-capable models discovered in inventory. |
+
+Direct routing is also supported:
+
+```text
+openrouter/openai/gpt-5.4-mini
+cloudflare/@cf/openai/gpt-oss-20b
+together/arize-ai/qwen-2-1.5b-instruct
+```
+
+If you send an exact model id without `provider/`, SimpleOpenRoad tries that model id across configured providers.
+
+## Supported Providers
+
+| Provider | Notes |
+|---|---|
+| [Gemini](https://aistudio.google.com/apikey) | Native adapter for Google Gemini models. Create or view keys in Google AI Studio. |
+| [GitHub Models](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) | OpenAI-compatible chat and catalog adapter. Uses GitHub personal access tokens. |
+| [Groq](https://console.groq.com/keys) | OpenAI-compatible chat and streaming. Create keys in GroqCloud. |
+| [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) | Account-scoped Workers AI support; Cloudflare account ID can be stored per key. |
+| [OpenRouter](https://openrouter.ai/settings/keys) | OpenAI-compatible routing and special handling for free-tier routes. |
+| [Together AI](https://docs.together.ai/docs/api-keys-authentication) | OpenAI-compatible catalog and chat; available models depend on account billing and provider availability. |
+| [Cerebras](https://inference-docs.cerebras.ai/api-reference/authentication) | OpenAI-compatible chat support. Create keys in the Cerebras Inference Cloud Console. |
+
+See [docs/PROVIDERS.md](docs/PROVIDERS.md) for provider-specific setup and caveats.
+
+## Runtime Behavior
+
+SimpleOpenRoad tracks runtime state separately from static configuration. The detailed behavior is documented in [Routing and Model Selection](docs/ROUTING.md), and the tunable YAML settings are in [Config Reference](docs/CONFIG_REFERENCE.md).
+
+- Key cooldown: temporarily avoids keys that hit rate limits or repeated failures.
+- Route memory: remembers successful models per alias/profile/context bucket and moves them forward.
+- Model quarantine: after repeated model failures, temporarily skips that `provider/model`.
+- Diagnostics: automatic tests and route preview show attempted, skipped, and failed candidates.
+
+Default model quarantine behavior:
+
+| Error Class | Default TTL |
+|---|---:|
+| `rate_limit` | 30 minutes |
+| `provider_unavailable` | 10 minutes |
+| `network_timeout` | 5 minutes |
+| `malformed_response` | 6 hours |
+| `unsupported_model` | 24 hours |
+| `unknown` | 30 minutes |
+
+Model quarantine settings are available in:
+
+```text
+sor -> Settings -> Model quarantine settings
+```
+
+See [docs/ROUTING.md](docs/ROUTING.md) for the full routing model.
+
+## Useful Commands
 
 ```bash
+sor
+sor providers test
+sor providers inventory --refresh
+sor providers consistency
+sor routes preview --model auto/general
+sor keys validate
+sor config validate
+sor update
 sor uninstall --full
 ```
 
-To update an installed server package while preserving `.env`, `config/config.yaml`, provider keys and `data/`:
+## Documentation
+
+- [Getting Started](docs/GETTING_STARTED.md)
+- [Client Configuration](docs/CLIENTS.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [Providers](docs/PROVIDERS.md)
+- [Routing and Model Selection](docs/ROUTING.md)
+- [Admin Guide](docs/ADMIN_GUIDE.md)
+- [Config Reference](docs/CONFIG_REFERENCE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Project Structure](docs/PROJECT_STRUCTURE.md)
+- [Test Plan](docs/TEST_PLAN.md)
+- [Release Guide](docs/RELEASE.md)
+
+## Updating
+
+Update an installed package while preserving `.env`, `config/config.yaml`, provider keys, and `data/`:
 
 ```bash
 sor update
 ```
 
-`sor update` installs the latest GitHub Release. To test unreleased changes from the `main` branch:
+Install a specific release:
 
 ```bash
-sor update --ref main
+sor update --version v0.3.0
 ```
 
-For release updates, you can choose channel `stable` or `prerelease`:
+Use a prerelease channel:
 
 ```bash
 sor update --channel prerelease
 ```
 
-## Documentation
+Test unreleased changes from `main`:
 
-- docs/ADMIN_GUIDE.md
-- docs/CONFIG_REFERENCE.md
-- docs/TROUBLESHOOTING.md
-- docs/ARCHITECTURE.md
-- docs/RELEASE.md
+```bash
+sor update --ref main
+```
 
-## Release automation
+## License
 
-When you publish a new release in GitHub, Actions automatically builds and attaches the Linux archive asset expected by install.sh.
-
+Apache-2.0. See [LICENSE](LICENSE).

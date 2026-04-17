@@ -1,5 +1,7 @@
 # Admin Guide
 
+Use this page as an operator reference. For first-time setup, start with [Getting Started](GETTING_STARTED.md). For client setup, use [Client Configuration](CLIENTS.md). For deployment, use [Deployment](DEPLOYMENT.md). For provider-specific setup, use [Providers](PROVIDERS.md). For routing behavior, use [Routing and Model Selection](ROUTING.md).
+
 ## 1. Initialize
 ```bash
 sor init --config-path config/config.yaml
@@ -67,6 +69,16 @@ List aliases:
 sor routes list
 ```
 
+Preview candidate order and diagnostics:
+```bash
+sor routes preview --model auto/general
+```
+
+Refresh provider inventory and generated aliases:
+```bash
+sor providers inventory --refresh
+```
+
 Adjust candidate priority in alias chain:
 ```bash
 sor routes set-priority --alias auto/fast --candidate github/gpt-4.1-mini --position 1
@@ -111,6 +123,7 @@ In the terminal panel:
 - Gateway -> API access token and test shows `MASTER_API_KEY`, can regenerate it, and can run an automatic local test request.
 - Providers and keys -> Remove provider key deletes a configured provider key from `config.yaml`.
 - Providers and keys -> Clean unconfigured placeholder keys removes old placeholder keys from `config.yaml`.
+- Settings -> Model quarantine settings changes how repeatedly failing models are skipped.
 - Service -> Update SimpleOpenRoad preserves `.env`, `config/config.yaml`, provider keys and `data/`.
 - Maintenance -> Full uninstall package removes the installed package.
 
@@ -157,6 +170,8 @@ OpenAI-compatible plugin settings:
 - Other generated aliases: `auto/fast`, `auto/free`, `auto/reasoning`, `auto/code`
 - Generated aliases are built from the current provider inventory and available keys.
 - Direct model format: `provider/model` or an exact model id such as `gpt-5.4-mini`
+- Route diagnostics, route memory, and model quarantine behavior are explained in [Routing and Model Selection](ROUTING.md).
+- Client-specific examples are in [Client Configuration](CLIENTS.md).
 
 Admin header:
 - `x-admin-key: <ADMIN_API_KEY>`

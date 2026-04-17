@@ -1,6 +1,8 @@
-# Config Format Reference
+# Config Reference
 
-## 1. `.env` Example
+SimpleOpenRoad reads environment values from `.env` and gateway settings from `config/config.yaml`.
+
+## `.env`
 
 ```env
 APP_ENV=production
@@ -14,7 +16,11 @@ MASTER_API_KEY=change-me-user-api-key
 ADMIN_API_KEY=change-me-admin-api-key
 ```
 
-## 2. `config/config.yaml` Example
+## `config/config.yaml`
+
+Use `config/config.example.yaml` as the authoritative template. The important sections are summarized below. For provider-specific setup and API key links, see [Providers](PROVIDERS.md).
+
+### Server
 
 ```yaml
 server:
@@ -22,12 +28,30 @@ server:
   port: 12345
   request_timeout_seconds: 60
   stream_timeout_seconds: 300
+```
 
+### Security
+
+```yaml
 security:
   require_master_key: true
   require_admin_key: true
   mask_secrets_in_logs: true
+```
 
+User API accepts:
+
+- `x-api-key: <MASTER_API_KEY>`
+- `Authorization: Bearer <MASTER_API_KEY>`
+
+Admin API accepts:
+
+- `x-admin-key: <ADMIN_API_KEY>`
+- `Authorization: Bearer <ADMIN_API_KEY>`
+
+### Routing
+
+```yaml
 routing:
   default_strategy: strict_priority
   retry:
@@ -43,28 +67,102 @@ routing:
     network_timeout: retry_then_switch_key
     malformed_response: switch_provider
     unsupported_model: switch_provider
+```
 
+`default_strategy` controls key selection unless a custom alias overrides it.
+
+Common strategies:
+
+- `strict_priority`
+- `least_errors`
+- `random_by_weight`
+- `least_recently_used`
+
+### Free Alias Policy
+
+```yaml
+routing:
+  free_alias:
+    max_candidates_per_request: 3
+    stop_on_provider_free_tier_rate_limit: true
+```
+
+`auto/free` is strict free-only. It does not silently fall back to paid models.
+
+### Model Quarantine
+
+```yaml
+routing:
+  model_quarantine:
+    enabled: true
+    failure_threshold: 3
+    default_ttl_seconds: 1800
+    error_ttl_seconds:
+      rate_limit: 1800
+      provider_unavailable: 600
+      network_timeout: 300
+      malformed_response: 21600
+      unsupported_model: 86400
+      unknown: 1800
+    overrides: []
+```
+
+After `failure_threshold` consecutive failures, a `provider/model` is skipped until the configured TTL expires.
+
+Override example:
+
+```yaml
+routing:
+  model_quarantine:
+    overrides:
+      - provider: together
+        model_pattern: "nvidia/*"
+        failure_threshold: 1
+        ttl_seconds: 7200
+```
+
+### Model Capability Hints
+
+```yaml
+model_capabilities:
+  tool_capable:
+    - codex
+    - coder
+    - qwen
+  tool_disabled:
+    - nano
+    - haiku
+```
+
+These are heuristic hints used during inventory classification.
+
+### Inventory
+
+```yaml
 inventory:
   refresh_time: "05:00"
   refresh_timezone: Europe/Moscow
   refresh_interval_hours: 24
   overrides: []
+```
 
+Generated aliases are built from provider inventory and cached until the next refresh window.
+
+Inventory override example:
+
+```yaml
+inventory:
+  overrides:
+    - provider: openrouter
+      model_pattern: "openai/*codex*"
+      force_categories: [code]
+      force_tool_capable: true
+```
+
+### Providers
+
+```yaml
 providers:
-  gemini:
-    enabled: true
-    priority: 10
-    endpoint: https://generativelanguage.googleapis.com
-    timeout_seconds: 40
-    keys: []
-
-  github:
-    enabled: true
-    priority: 20
-    endpoint: https://models.github.ai
-    timeout_seconds: 45
-    keys: []
-
   openrouter:
     enabled: true
     priority: 30
@@ -72,15 +170,63 @@ providers:
     timeout_seconds: 45
     headers:
       HTTP-Referer: https://localhost
-      X-Title: ai-gateway-router
+      X-Title: simple-open-road
     keys: []
+```
 
+Lower provider `priority` values are ordered earlier in generated global aliases.
+
+Cloudflare supports account IDs at provider or key level:
+
+```yaml
+providers:
+  cloudflare:
+    enabled: true
+    priority: 29
+    endpoint: https://api.cloudflare.com/client/v4
+    account_id: ""
+    keys:
+      - id: cloudflare-main
+        key: <TOKEN>
+        account_id: <ACCOUNT_ID>
+```
+
+Use key-level `account_id` for multiple Cloudflare accounts.
+
+### Custom Aliases
+
+```yaml
 routes:
-  aliases: {}
+  aliases:
+    custom/fast:
+      strategy: strict_priority
+      selection: ordered
+      candidates:
+        - provider: github
+          model: gpt-4.1-mini
+```
 
+Generated aliases such as `auto/general` should not be stored in `routes.aliases`; they are built from inventory.
+
+### Storage
+
+```yaml
 storage:
   sqlite_path: data/gateway.db
+```
 
+Runtime state is stored in SQLite:
+
+- key runtime state;
+- health checks;
+- request attempts;
+- usage stats;
+- route memory;
+- model quarantine state.
+
+### Health and Observability
+
+```yaml
 health:
   check_interval_seconds: 300
   startup_check: true
@@ -93,72 +239,11 @@ observability:
   save_attempt_events: true
 ```
 
-Generated aliases are built from the provider inventory at runtime and cached until the next configured inventory refresh window. By default, cached inventory becomes stale every day at `05:00` in `Europe/Moscow`; change `inventory.refresh_time`, `inventory.refresh_timezone`, or `inventory.refresh_interval_hours` if another schedule is needed. Keep `routes.aliases` for custom, non-generated aliases only. Providers without configured active keys are skipped before any provider request is made. If all candidates fail, the gateway returns an error.
+## Validation
 
-Requests that do not match an alias are treated as direct model requests. `provider/model` forces a provider; an exact model id such as `gpt-5.4-mini` is tried with the same model id across configured providers.
-
-## 3. SQLite Schema (MVP)
-
-```sql
-CREATE TABLE IF NOT EXISTS key_runtime_state (
-  key_id TEXT PRIMARY KEY,
-  provider TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'unknown',
-  active INTEGER NOT NULL DEFAULT 1,
-  consecutive_errors INTEGER NOT NULL DEFAULT 0,
-  cooldown_until TEXT,
-  last_check_at TEXT,
-  last_success_at TEXT,
-  last_error_at TEXT,
-  last_error_code TEXT,
-  last_error_message TEXT,
-  success_count INTEGER NOT NULL DEFAULT 0,
-  failure_count INTEGER NOT NULL DEFAULT 0,
-  switch_count INTEGER NOT NULL DEFAULT 0,
-  avg_latency_ms REAL NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS health_checks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  key_id TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  status TEXT NOT NULL,
-  latency_ms REAL,
-  models_json TEXT,
-  error_code TEXT,
-  error_message TEXT,
-  checked_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS request_attempts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  request_id TEXT NOT NULL,
-  route_alias TEXT,
-  provider TEXT NOT NULL,
-  key_id TEXT NOT NULL,
-  model TEXT NOT NULL,
-  attempt_index INTEGER NOT NULL,
-  outcome TEXT NOT NULL,
-  error_class TEXT,
-  latency_ms REAL,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS usage_stats (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  bucket_minute TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  key_id TEXT NOT NULL,
-  requests_total INTEGER NOT NULL DEFAULT 0,
-  success_total INTEGER NOT NULL DEFAULT 0,
-  failure_total INTEGER NOT NULL DEFAULT 0,
-  tokens_prompt INTEGER NOT NULL DEFAULT 0,
-  tokens_completion INTEGER NOT NULL DEFAULT 0,
-  estimated_cost_usd REAL NOT NULL DEFAULT 0,
-  avg_latency_ms REAL NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_health_key_time ON health_checks(key_id, checked_at);
-CREATE INDEX IF NOT EXISTS idx_attempts_request ON request_attempts(request_id);
-CREATE INDEX IF NOT EXISTS idx_usage_bucket ON usage_stats(bucket_minute, provider, key_id);
+```bash
+sor config validate
+sor providers test
+sor providers inventory --refresh
+sor routes preview --model auto/general
 ```
