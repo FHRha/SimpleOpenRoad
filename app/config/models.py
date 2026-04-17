@@ -141,6 +141,7 @@ class KeyCooldownConfig(BaseModel):
 class KeyConfig(BaseModel):
     id: str
     key: str
+    account_id: str | None = None
     alias: str | None = None
     active: bool = True
     priority: int = 100

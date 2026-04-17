@@ -252,7 +252,7 @@ def _config_fingerprint(config) -> str:
         parts.append(f"account_id={provider_cfg.account_id or ''}")
         for key in sorted(provider_cfg.keys, key=lambda item: item.id):
             key_hash = hashlib.sha256(str(key.key).encode("utf-8")).hexdigest()
-            parts.append(f"key={key.id}:{key.active}:{key_hash}")
+            parts.append(f"key={key.id}:{key.active}:{key.account_id or ''}:{key_hash}")
     for override in config.inventory.overrides:
         parts.append(f"override={override.model_dump_json()}")
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()

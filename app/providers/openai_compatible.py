@@ -39,7 +39,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         headers.update(self.config.headers)
         return headers
 
-    def _url(self, path: str) -> str:
+    def _url(self, path: str, key: KeyConfig | None = None) -> str:
         endpoint = self.config.endpoint.rstrip("/")
         normalized_path = path if path.startswith("/") else f"/{path}"
         if endpoint.endswith("/v1") and normalized_path.startswith("/v1/"):
@@ -139,7 +139,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
-                    self._url(path),
+                    self._url(path, key),
                     headers=self._build_headers(key),
                     json=payload,
                 )
@@ -201,7 +201,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     async with client.stream(
                         "POST",
-                        self._url(self.chat_completions_path),
+                        self._url(self.chat_completions_path, key),
                         headers=self._build_headers(key),
                         json=payload,
                     ) as response:
@@ -277,7 +277,7 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.get(
-                    self._url(path),
+                    self._url(path, key),
                     headers=self._build_headers(key),
                 )
         except httpx.TimeoutException as exc:

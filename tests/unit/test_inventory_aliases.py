@@ -185,3 +185,37 @@ def test_inventory_aliases_build_media_families_without_affecting_text_aliases()
     assert "auto/video/default" in alias_ids
     assert "auto/audio/default" in alias_ids
     assert "auto/text/general" not in alias_ids
+
+
+def test_inventory_aliases_skip_free_cheap_when_provider_has_no_free_candidates() -> None:
+    config = GatewayConfig(
+        providers={
+            "together": ProviderConfig(enabled=True, priority=10, endpoint="https://api.together.xyz/v1"),
+        }
+    )
+    models = [
+        DiscoveredModel(
+            provider="together",
+            model_id="mistralai/Devstral-Small-2505",
+            display_name="mistralai/Devstral-Small-2505",
+            modality="text",
+            is_text_candidate=True,
+        )
+    ]
+    classifications = [
+        ModelClassification(
+            provider="together",
+            model_id="mistralai/Devstral-Small-2505",
+            modality="text",
+            fast_score=30,
+            general_score=20,
+            classification_tags=["fast", "general"],
+        )
+    ]
+
+    aliases = build_generated_aliases(config, models, classifications, [])
+    alias_ids = {item.alias_id for item in aliases}
+
+    assert "together/text/free-cheap" not in alias_ids
+    assert "auto/text/free-cheap" not in alias_ids
+    assert "auto/free-cheap" not in alias_ids

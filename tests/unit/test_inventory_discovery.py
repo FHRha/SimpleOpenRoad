@@ -190,11 +190,8 @@ async def test_inventory_discovery_uses_metadata_to_exclude_non_text_together_mo
     assert models["ByteDance/Seedance-1.0-lite"].is_text_candidate is False
 
     alias_map = {item.alias_id: item for item in snapshot.generated_aliases}
-    free_cheap = alias_map["together/text/free-cheap"]
-    candidate_ids = [item.model_id for item in free_cheap.candidates]
-    assert "mistralai/Devstral-Small-2505" in candidate_ids
-    assert "minimax/speech-2.6-turbo" not in candidate_ids
-    assert "ByteDance/Seedance-1.0-lite" not in candidate_ids
+    assert "together/text/free-cheap" not in alias_map
+    assert "auto/text/free-cheap" not in alias_map
 
 
 @pytest.mark.asyncio

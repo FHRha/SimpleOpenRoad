@@ -83,6 +83,22 @@ class RoutingEngine:
         return detail
 
     @staticmethod
+    def _model_source_key_ids(snapshot, candidate: RouteCandidate) -> set[str] | None:
+        if snapshot is None:
+            return None
+        for model in snapshot.models:
+            if model.provider == candidate.provider and model.model_id == candidate.model:
+                return set(model.source_key_ids)
+        return None
+
+    def _keys_for_candidate(self, snapshot, candidate: RouteCandidate, keys):
+        source_key_ids = self._model_source_key_ids(snapshot, candidate)
+        if not source_key_ids:
+            return keys
+        filtered = [key for key in keys if key.id in source_key_ids]
+        return filtered or keys
+
+    @staticmethod
     def _text_generated_aliases(snapshot) -> list[GeneratedAlias]:
         return [alias for alias in snapshot.generated_aliases if alias.modality == "text"] if snapshot else []
 
@@ -449,6 +465,7 @@ class RoutingEngine:
                 candidate.provider,
                 runtime_states,
             )
+            configured_keys = self._keys_for_candidate(snapshot, candidate, configured_keys)
             if not configured_keys:
                 candidate_details.append(self._candidate_detail(candidate, "skipped", "no_available_keys", 0))
                 continue
@@ -751,6 +768,7 @@ class RoutingEngine:
                 candidate.provider,
                 runtime_states,
             )
+            configured_keys = self._keys_for_candidate(snapshot, candidate, configured_keys)
             if not configured_keys:
                 candidate_details.append(self._candidate_detail(candidate, "skipped", "no_available_keys", 0))
                 continue

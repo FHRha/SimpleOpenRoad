@@ -12,7 +12,7 @@ from app.core.errors import ErrorClass, GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
 from app.health.checker import HealthChecker
 from app.inventory.discovery import InventoryDiscoveryService
-from app.inventory.models import GeneratedAlias, GeneratedAliasCandidate, InventorySnapshot
+from app.inventory.models import DiscoveredModel, GeneratedAlias, GeneratedAliasCandidate, InventorySnapshot
 from app.providers.base import ProviderAdapter
 from app.registry.keys import KeyRegistry
 from app.router.engine import RoutingEngine
@@ -314,6 +314,32 @@ async def test_router_skips_candidate_when_context_limit_is_too_small(tmp_path: 
 
     assert payload["model"] == "p1/m2"
     assert [attempt.model for attempt in decision.attempts] == ["m2"]
+
+
+@pytest.mark.asyncio
+async def test_router_prefers_keys_that_discovered_the_candidate_model(tmp_path: Path) -> None:
+    engine, key_registry, _ = _build_engine(tmp_path)
+    snapshot = InventorySnapshot(
+        refreshed_at="2026-04-17T00:00:00+00:00",
+        models=[
+            DiscoveredModel(
+                provider="p1",
+                model_id="m1",
+                display_name="m1",
+                source_key_ids=["p1-low"],
+                modality="text",
+                is_text_candidate=True,
+            )
+        ],
+    )
+    engine.inventory_discovery.cache.set(snapshot)
+    request = UnifiedLLMRequest(model="p1/m1", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias=None, stream=False)
+
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/m1"
+    assert decision.selected_key_id == "p1-low"
 
 
 @pytest.mark.asyncio

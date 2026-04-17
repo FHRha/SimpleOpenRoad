@@ -17,20 +17,20 @@ class CloudflareWorkersAIAdapter(OpenAICompatibleAdapter):
     def __init__(self, config: ProviderConfig):
         super().__init__(provider_name="cloudflare", config=config)
 
-    def _require_account_id(self) -> str:
-        account_id = (self.config.account_id or "").strip()
+    def _require_account_id(self, key: KeyConfig | None = None) -> str:
+        account_id = ((key.account_id if key is not None else None) or self.config.account_id or "").strip()
         if not account_id:
             raise GatewayError(
-                message="Cloudflare Workers AI requires provider.account_id in config",
+                message="Cloudflare Workers AI requires account_id on the key or provider config",
                 error_class=ErrorClass.AUTH_FORBIDDEN,
                 status_code=403,
                 provider=self.provider_name,
             )
         return account_id
 
-    def _url(self, path: str) -> str:
+    def _url(self, path: str, key: KeyConfig | None = None) -> str:
         endpoint = self.config.endpoint.rstrip("/")
-        account_id = self._require_account_id()
+        account_id = self._require_account_id(key)
         normalized_path = path if path.startswith("/") else f"/{path}"
         return f"{endpoint}/accounts/{account_id}/ai{normalized_path}"
 

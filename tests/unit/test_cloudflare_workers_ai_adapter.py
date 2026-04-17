@@ -74,6 +74,30 @@ async def test_cloudflare_requires_account_id() -> None:
 
 
 @pytest.mark.asyncio
+@respx.mock
+async def test_cloudflare_key_account_id_overrides_provider_account_id() -> None:
+    route = respx.post(
+        "https://api.cloudflare.com/client/v4/accounts/key-acc/ai/v1/chat/completions"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        )
+    )
+
+    result = await _adapter(account_id="provider-acc").chat_completions(
+        UnifiedLLMRequest(
+            model="@cf/meta/llama-3.1-8b-instruct",
+            messages=[ChatMessage(role="user", content="hello")],
+        ),
+        KeyConfig(id="cloudflare-main", key="cf-token", account_id="key-acc"),
+    )
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert route.called
+
+
+@pytest.mark.asyncio
 async def test_cloudflare_rejects_responses_endpoint() -> None:
     with pytest.raises(GatewayError) as exc_info:
         await _adapter().responses(

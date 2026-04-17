@@ -2128,6 +2128,7 @@ def _interactive_add_provider_key(config_path: str) -> None:
         provider=provider,
         key_id=key_id,
         secret=secret,
+        account_id=account_id if provider == "cloudflare" else None,
         priority=priority,
         config_path=config_path,
         validate=validate_now,
@@ -2532,6 +2533,7 @@ def keys_add(
     provider: str = typer.Option(..., help="Provider name"),
     key_id: str = typer.Option(..., help="Unique key id"),
     secret: str = typer.Option(..., help="API key value"),
+    account_id: str | None = typer.Option(None, help="Optional account id override for providers that need it"),
     priority: int = typer.Option(100, help="Priority (higher is better)"),
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
     validate: bool = typer.Option(True, help="Validate key after add"),
@@ -2557,6 +2559,7 @@ def keys_add(
         {
             "id": key_id,
             "key": secret,
+            "account_id": account_id,
             "active": True,
             "priority": priority,
             "weight": 1,
@@ -3720,6 +3723,8 @@ def _show_selected_provider_key(provider_name: str, key_data: dict[str, Any]) ->
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("id", str(key_data.get("id", "")))
+    if provider_name == "cloudflare" and key_data.get("account_id"):
+        table.add_row("account_id", str(key_data.get("account_id", "")))
     table.add_row("configured", "yes" if is_configured_secret(str(key_data.get("key", ""))) else "no")
     table.add_row("active", str(key_data.get("active", True)))
     table.add_row("priority", str(key_data.get("priority", 100)))

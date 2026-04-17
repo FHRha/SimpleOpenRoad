@@ -2061,12 +2061,22 @@ def test_interactive_add_provider_key_persists_cloudflare_account_id_before_keys
 
     observed: dict[str, str] = {}
 
-    def _fake_keys_add(provider: str, key_id: str, secret: str, priority: int, config_path: str, validate: bool) -> None:
+    def _fake_keys_add(
+        provider: str,
+        key_id: str,
+        secret: str,
+        account_id: str | None,
+        priority: int,
+        config_path: str,
+        validate: bool,
+    ) -> None:
         data = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
         observed["account_id"] = str(data["providers"]["cloudflare"]["account_id"])
+        observed["key_account_id"] = str(account_id)
 
     monkeypatch.setattr("app.cli.app.keys_add", _fake_keys_add)
 
     _interactive_add_provider_key(str(config_path))
 
     assert observed["account_id"] == "acc-123"
+    assert observed["key_account_id"] == "acc-123"

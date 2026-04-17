@@ -24,7 +24,7 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
             },
         )
 
-    def _url(self, path: str) -> str:
+    def _url(self, path: str, key: KeyConfig | None = None) -> str:
         endpoint = self.config.endpoint.rstrip("/")
         normalized_path = path if path.startswith("/") else f"/{path}"
         if endpoint.endswith("/inference"):

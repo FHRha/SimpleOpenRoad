@@ -168,9 +168,11 @@ def _build_provider_candidates(
     special_routes: list[ProviderSpecialRoute],
 ) -> list[GeneratedAliasCandidate]:
     candidates: list[GeneratedAliasCandidate] = []
+    has_free_candidate = False
     if category in {"free", "free-cheap"}:
         for route in special_routes:
             if "free" in route.category_hints and route.modality == "text":
+                has_free_candidate = True
                 candidates.append(
                     GeneratedAliasCandidate(
                         provider=provider,
@@ -199,9 +201,12 @@ def _build_provider_candidates(
                 candidate_type="model",
             )
             if classification.free_score > 0:
+                has_free_candidate = True
                 free_models.append(candidate)
             elif classification.fast_score > 0:
                 cheap_models.append(candidate)
+        if not has_free_candidate:
+            return []
         candidates.extend(free_models)
         candidates.extend(cheap_models)
         return _dedupe_candidates(candidates)
