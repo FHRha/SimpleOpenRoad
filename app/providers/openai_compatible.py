@@ -192,8 +192,15 @@ class OpenAICompatibleAdapter(ProviderAdapter):
     async def validate_key(self, key: KeyConfig) -> dict:
         try:
             models = await self.list_models(key)
+            if not models:
+                return {
+                    "status": "degraded",
+                    "models": [],
+                    "error_code": "no_models_discovered",
+                    "error_message": f"Provider {self.provider_name} returned an empty model catalog",
+                }
             return {
-                "status": "valid" if models else "degraded",
+                "status": "valid",
                 "models": models,
                 "error_code": None,
                 "error_message": None,

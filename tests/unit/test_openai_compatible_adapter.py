@@ -81,6 +81,21 @@ async def test_openai_compatible_lists_models_with_get() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_openai_compatible_validate_reports_empty_catalog_reason() -> None:
+    respx.get("https://openrouter.example/api/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+
+    result = await _adapter_with_v1_endpoint().validate_key(KeyConfig(id="openrouter-main", key="secret"))
+
+    assert result["status"] == "degraded"
+    assert result["models"] == []
+    assert result["error_code"] == "no_models_discovered"
+    assert "empty model catalog" in result["error_message"]
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_openai_compatible_classifies_quota_403_as_rate_limit() -> None:
     respx.post("https://openrouter.example/api/v1/chat/completions").mock(
         return_value=httpx.Response(

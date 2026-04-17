@@ -27,8 +27,11 @@ class GitHubModelsAdapter(OpenAICompatibleAdapter):
     def _url(self, path: str) -> str:
         endpoint = self.config.endpoint.rstrip("/")
         normalized_path = path if path.startswith("/") else f"/{path}"
-        if endpoint.endswith("/inference") and normalized_path.startswith("/inference/"):
-            normalized_path = normalized_path.removeprefix("/inference")
+        if endpoint.endswith("/inference"):
+            if normalized_path.startswith("/inference/"):
+                normalized_path = normalized_path.removeprefix("/inference")
+            else:
+                endpoint = endpoint.removesuffix("/inference")
         return f"{endpoint}{normalized_path}"
 
     async def responses(self, request: UnifiedLLMRequest, key: KeyConfig) -> dict:

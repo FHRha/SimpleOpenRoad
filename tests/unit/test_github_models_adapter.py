@@ -61,6 +61,33 @@ async def test_github_models_does_not_duplicate_inference_path() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_github_models_catalog_uses_root_endpoint_when_configured_with_inference_path() -> None:
+    respx.get("https://models.github.ai/catalog/models").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "openai/gpt-4.1-mini",
+                    "limits": {"max_input_tokens": 1048576, "max_output_tokens": 32768},
+                }
+            ],
+        )
+    )
+
+    records = await _adapter("https://models.github.ai/inference").list_model_records(
+        KeyConfig(id="github-main", key="github-token")
+    )
+
+    assert records == [
+        {
+            "id": "openai/gpt-4.1-mini",
+            "limits": {"max_input_tokens": 1048576, "max_output_tokens": 32768},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_github_models_lists_catalog_models() -> None:
     respx.get("https://models.github.ai/catalog/models").mock(
         return_value=httpx.Response(
