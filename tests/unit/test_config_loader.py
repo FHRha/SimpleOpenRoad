@@ -125,6 +125,40 @@ health:
     assert cfg.inventory.refresh_interval_hours == 12
 
 
+def test_load_gateway_config_parses_model_quarantine_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+providers: {}
+routing:
+  model_quarantine:
+    enabled: true
+    failure_threshold: 2
+    default_ttl_seconds: 900
+    error_ttl_seconds:
+      rate_limit: 120
+      unsupported_model: 3600
+    overrides:
+      - provider: together
+        model_pattern: "nvidia/*"
+        failure_threshold: 1
+        ttl_seconds: 7200
+health:
+  startup_check: false
+""",
+        encoding="utf-8",
+    )
+
+    cfg = load_gateway_config(str(config_path))
+
+    assert cfg.routing.model_quarantine.failure_threshold == 2
+    assert cfg.routing.model_quarantine.default_ttl_seconds == 900
+    assert cfg.routing.model_quarantine.error_ttl_seconds["rate_limit"] == 120
+    assert cfg.routing.model_quarantine.overrides[0].provider == "together"
+    assert cfg.routing.model_quarantine.overrides[0].model_pattern == "nvidia/*"
+    assert cfg.routing.model_quarantine.overrides[0].ttl_seconds == 7200
+
+
 def test_load_gateway_config_merges_missing_provider_defaults_from_example(tmp_path: Path) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()

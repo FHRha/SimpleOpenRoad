@@ -46,6 +46,7 @@ from app.router.model_planner import plan_candidates
 from app.router.request_analyzer import RequestRouteAnalysis, analyze_request_route
 from app.storage.db import SQLiteDB
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
+from app.storage.repositories.model_runtime_repo import ModelRuntimeRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 
 cli_app = typer.Typer(
@@ -163,6 +164,10 @@ def _show_settings_summary(config_path: str) -> None:
     table.add_row("server.request_timeout_seconds", str(cfg.server.request_timeout_seconds))
     table.add_row("server.stream_timeout_seconds", str(cfg.server.stream_timeout_seconds))
     table.add_row("routing.retry.max_attempts_per_candidate", str(cfg.routing.retry.max_attempts_per_candidate))
+    table.add_row("routing.model_quarantine.enabled", str(cfg.routing.model_quarantine.enabled))
+    table.add_row("routing.model_quarantine.failure_threshold", str(cfg.routing.model_quarantine.failure_threshold))
+    table.add_row("routing.model_quarantine.default_ttl_seconds", str(cfg.routing.model_quarantine.default_ttl_seconds))
+    table.add_row("routing.model_quarantine.overrides", str(len(cfg.routing.model_quarantine.overrides)))
     table.add_row("health.startup_check", str(cfg.health.startup_check))
     table.add_row("health.check_interval_seconds", str(cfg.health.check_interval_seconds))
     table.add_row("observability.request_log", str(cfg.observability.request_log))
@@ -591,6 +596,13 @@ def _route_memory_repo(cfg: GatewayConfig) -> RouteModelMemoryRepository:
     schema_path = files("app.storage").joinpath("schema.sql")
     db.initialize(str(schema_path))
     return RouteModelMemoryRepository(db)
+
+
+def _model_runtime_repo(cfg: GatewayConfig) -> ModelRuntimeRepository:
+    db = SQLiteDB(cfg.storage.sqlite_path)
+    schema_path = files("app.storage").joinpath("schema.sql")
+    db.initialize(str(schema_path))
+    return ModelRuntimeRepository(db)
 
 
 def _alias_raw_candidates(
@@ -3944,6 +3956,180 @@ def _run_alias_settings_panel(config_path: str) -> None:
             _pause()
 
 
+def _show_model_quarantine_settings(config_path: str) -> None:
+    cfg = load_gateway_config(config_path=config_path)
+    quarantine = cfg.routing.model_quarantine
+    table = Table(title="Model Quarantine Settings", box=box.ASCII)
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row("enabled", str(quarantine.enabled))
+    table.add_row("failure_threshold", str(quarantine.failure_threshold))
+    table.add_row("default_ttl_seconds", str(quarantine.default_ttl_seconds))
+    for error_class, ttl in sorted(quarantine.error_ttl_seconds.items()):
+        table.add_row(f"error_ttl_seconds.{error_class}", str(ttl))
+    console.print(table)
+
+    overrides = Table(title="Model Quarantine Overrides", box=box.ASCII)
+    overrides.add_column("#")
+    overrides.add_column("Provider")
+    overrides.add_column("Model pattern")
+    overrides.add_column("Threshold")
+    overrides.add_column("TTL seconds")
+    if not quarantine.overrides:
+        overrides.add_row("-", "-", "<empty>", "-", "-")
+    else:
+        for index, item in enumerate(quarantine.overrides, start=1):
+            overrides.add_row(
+                str(index),
+                item.provider or "*",
+                item.model_pattern,
+                str(item.failure_threshold if item.failure_threshold is not None else "<default>"),
+                str(item.ttl_seconds if item.ttl_seconds is not None else "<default>"),
+            )
+    console.print(overrides)
+
+
+def _run_model_quarantine_panel(config_path: str) -> None:
+    while True:
+        _print_menu(
+            title="SimpleOpenRoad / Settings / Model Quarantine",
+            config_path=config_path,
+            lines=[
+                "1) Show model quarantine settings",
+                "2) Toggle model quarantine",
+                "3) Set default failure threshold",
+                "4) Set default TTL",
+                "5) Set TTL for error class",
+                "6) Add provider/model override",
+                "7) Remove override",
+                "8) Reset model quarantine state",
+                "0) Back",
+            ],
+        )
+        choice = _prompt_menu_choice()
+        try:
+            if choice == "1":
+                _show_model_quarantine_settings(config_path)
+                _pause()
+            elif choice == "2":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.confirm(
+                    "Enable model quarantine",
+                    default=cfg.routing.model_quarantine.enabled,
+                )
+                _update_config_value(config_path, value, "routing", "model_quarantine", "enabled")
+                console.print(f"Updated routing.model_quarantine.enabled: {value}")
+                _pause()
+            elif choice == "3":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt(
+                    "routing.model_quarantine.failure_threshold",
+                    default=str(cfg.routing.model_quarantine.failure_threshold),
+                ).strip()
+                _update_config_value(
+                    config_path,
+                    max(1, int(value)),
+                    "routing",
+                    "model_quarantine",
+                    "failure_threshold",
+                )
+                console.print(f"Updated routing.model_quarantine.failure_threshold: {value}")
+                _pause()
+            elif choice == "4":
+                cfg = load_gateway_config(config_path=config_path)
+                value = typer.prompt(
+                    "routing.model_quarantine.default_ttl_seconds",
+                    default=str(cfg.routing.model_quarantine.default_ttl_seconds),
+                ).strip()
+                _update_config_value(
+                    config_path,
+                    max(0, int(value)),
+                    "routing",
+                    "model_quarantine",
+                    "default_ttl_seconds",
+                )
+                console.print(f"Updated routing.model_quarantine.default_ttl_seconds: {value}")
+                _pause()
+            elif choice == "5":
+                cfg = load_gateway_config(config_path=config_path)
+                error_class = typer.prompt(
+                    "Error class",
+                    default="unsupported_model",
+                ).strip()
+                current = cfg.routing.model_quarantine.error_ttl_seconds.get(
+                    error_class,
+                    cfg.routing.model_quarantine.default_ttl_seconds,
+                )
+                ttl = typer.prompt("TTL seconds", default=str(current)).strip()
+                path = _config_path(config_path)
+                data = _load_yaml(path)
+                ttl_map = data.setdefault("routing", {}).setdefault("model_quarantine", {}).setdefault(
+                    "error_ttl_seconds",
+                    {},
+                )
+                ttl_map[error_class] = max(0, int(ttl))
+                _save_yaml(path, data)
+                console.print(f"Updated routing.model_quarantine.error_ttl_seconds.{error_class}: {ttl}")
+                _pause()
+            elif choice == "6":
+                provider = typer.prompt("Provider (* for any)", default="*").strip()
+                model_pattern = typer.prompt("Model pattern", default="*").strip()
+                threshold_raw = typer.prompt("Failure threshold (blank for default)", default="").strip()
+                ttl_raw = typer.prompt("TTL seconds (blank for default)", default="").strip()
+                override = {
+                    "provider": None if provider in {"", "*"} else provider,
+                    "model_pattern": model_pattern or "*",
+                    "failure_threshold": int(threshold_raw) if threshold_raw else None,
+                    "ttl_seconds": int(ttl_raw) if ttl_raw else None,
+                }
+                path = _config_path(config_path)
+                data = _load_yaml(path)
+                overrides = data.setdefault("routing", {}).setdefault("model_quarantine", {}).setdefault(
+                    "overrides",
+                    [],
+                )
+                if not isinstance(overrides, list):
+                    raise typer.BadParameter("routing.model_quarantine.overrides must be a list")
+                overrides.append(override)
+                _save_yaml(path, data)
+                console.print("Added model quarantine override")
+                _pause()
+            elif choice == "7":
+                cfg = load_gateway_config(config_path=config_path)
+                _show_model_quarantine_settings(config_path)
+                if not cfg.routing.model_quarantine.overrides:
+                    _pause()
+                    continue
+                index = _prompt_numbered_choice(len(cfg.routing.model_quarantine.overrides), "Override number")
+                path = _config_path(config_path)
+                data = _load_yaml(path)
+                overrides = data.setdefault("routing", {}).setdefault("model_quarantine", {}).setdefault(
+                    "overrides",
+                    [],
+                )
+                if not isinstance(overrides, list):
+                    raise typer.BadParameter("routing.model_quarantine.overrides must be a list")
+                removed = overrides.pop(index - 1)
+                _save_yaml(path, data)
+                console.print(f"Removed override: {removed}")
+                _pause()
+            elif choice == "8":
+                cfg = load_gateway_config(config_path=config_path)
+                provider = typer.prompt("Provider (blank for all)", default="").strip() or None
+                model = typer.prompt("Model id (blank for all)", default="").strip() or None
+                count = _model_runtime_repo(cfg).reset(provider=provider, model=model)
+                console.print(f"Reset model quarantine rows: {count}")
+                _pause()
+            elif choice == "0":
+                return
+            else:
+                console.print("Unknown option")
+                _pause()
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"Operation failed: {exc}")
+            _pause()
+
+
 def _run_settings_panel(config_path: str) -> None:
     while True:
         _print_menu(
@@ -3963,7 +4149,8 @@ def _run_settings_panel(config_path: str) -> None:
                 "11) Alias chain settings",
                 "12) Provider settings",
                 "13) Inventory refresh schedule",
-                "14) Reload config in running app",
+                "14) Model quarantine settings",
+                "15) Reload config in running app",
                 "0) Back",
             ],
         )
@@ -4032,6 +4219,8 @@ def _run_settings_panel(config_path: str) -> None:
             elif choice == "13":
                 _run_inventory_schedule_panel(config_path=config_path)
             elif choice == "14":
+                _run_model_quarantine_panel(config_path=config_path)
+            elif choice == "15":
                 config_reload(config_path=config_path)
                 _pause()
             elif choice == "0":

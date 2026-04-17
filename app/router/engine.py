@@ -6,6 +6,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
+from fnmatch import fnmatchcase
 
 from app.config.runtime import RuntimeConfig
 from app.core.errors import ErrorClass, GatewayError
@@ -29,6 +30,7 @@ from app.router.response_validator import validate_chat_completion_payload, vali
 from app.router.selector import select_keys
 from app.router.stream_normalizer import normalize_openai_stream
 from app.storage.repositories.attempts_repo import AttemptsRepository
+from app.storage.repositories.model_runtime_repo import ModelRuntimeRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
 
@@ -42,11 +44,13 @@ class RoutingEngine:
         route_memory_repo: RouteModelMemoryRepository | None,
         stats_repo: StatsRepository,
         inventory_discovery: InventoryDiscoveryService,
+        model_runtime_repo: ModelRuntimeRepository | None = None,
     ):
         self.runtime_config = runtime_config
         self.key_registry = key_registry
         self.attempts_repo = attempts_repo
         self.route_memory_repo = route_memory_repo
+        self.model_runtime_repo = model_runtime_repo
         self.stats_repo = stats_repo
         self.inventory_discovery = inventory_discovery
         self.logger = get_logger("gateway.router")
@@ -81,6 +85,75 @@ class RoutingEngine:
         if keys is not None:
             detail["available_keys"] = keys
         return detail
+
+    @staticmethod
+    def _quarantine_detail(candidate: RouteCandidate, state: dict) -> dict:
+        detail = RoutingEngine._candidate_detail(candidate, "skipped", "model_quarantined")
+        detail["quarantined_until"] = str(state.get("quarantined_until") or "")
+        detail["consecutive_failures"] = int(state.get("consecutive_failures", 0) or 0)
+        if state.get("last_error_class"):
+            detail["last_error_class"] = str(state.get("last_error_class"))
+        return detail
+
+    def _filter_quarantined_candidates(
+        self,
+        config,
+        candidates: list[RouteCandidate],
+    ) -> tuple[list[RouteCandidate], list[dict]]:
+        if not config.routing.model_quarantine.enabled or self.model_runtime_repo is None:
+            return candidates, []
+        active = self.model_runtime_repo.list_active_quarantines()
+        allowed: list[RouteCandidate] = []
+        skipped: list[dict] = []
+        for candidate in candidates:
+            state = active.get((candidate.provider, candidate.model))
+            if state is None:
+                allowed.append(candidate)
+                continue
+            skipped.append(self._quarantine_detail(candidate, state))
+        return allowed, skipped
+
+    @staticmethod
+    def _model_quarantine_settings(config, candidate: RouteCandidate, error_class: ErrorClass) -> tuple[int, int]:
+        quarantine = config.routing.model_quarantine
+        threshold = max(1, int(quarantine.failure_threshold))
+        ttl = int(quarantine.error_ttl_seconds.get(error_class.value, quarantine.default_ttl_seconds))
+        for override in quarantine.overrides:
+            if override.provider and override.provider != candidate.provider:
+                continue
+            if not fnmatchcase(candidate.model.lower(), override.model_pattern.lower()):
+                continue
+            if override.failure_threshold is not None:
+                threshold = max(1, int(override.failure_threshold))
+            if override.ttl_seconds is not None:
+                ttl = max(0, int(override.ttl_seconds))
+        return threshold, ttl
+
+    def _record_model_success(self, config, candidate: RouteCandidate, latency_ms: float) -> None:
+        if not config.routing.model_quarantine.enabled or self.model_runtime_repo is None:
+            return
+        self.model_runtime_repo.record_success(candidate.provider, candidate.model, latency_ms)
+
+    def _record_model_failure(
+        self,
+        config,
+        candidate: RouteCandidate,
+        error_class: ErrorClass,
+        error_message: str,
+    ) -> None:
+        if not config.routing.model_quarantine.enabled or self.model_runtime_repo is None:
+            return
+        if error_class in (ErrorClass.AUTH_INVALID, ErrorClass.AUTH_FORBIDDEN):
+            return
+        threshold, ttl = self._model_quarantine_settings(config, candidate, error_class)
+        self.model_runtime_repo.record_failure(
+            provider=candidate.provider,
+            model=candidate.model,
+            error_class=error_class,
+            error_message=error_message,
+            failure_threshold=threshold,
+            ttl_seconds=ttl,
+        )
 
     @staticmethod
     def _model_source_key_ids(snapshot, candidate: RouteCandidate) -> set[str] | None:
@@ -431,6 +504,7 @@ class RoutingEngine:
             profile=route_profile,
             context_bucket=context_bucket,
         )
+        candidates, quarantine_skipped_details = self._filter_quarantined_candidates(config, candidates)
         candidates, free_alias_detail = self._apply_free_alias_budget(
             config,
             candidates,
@@ -451,7 +525,7 @@ class RoutingEngine:
         runtime_states = {s["key_id"]: s for s in self.key_registry.runtime_repo.list_states()}
         final_error: GatewayError | None = None
         attempt_index = 0
-        candidate_details: list[dict] = list(context_skipped_details)
+        candidate_details: list[dict] = [*context_skipped_details, *quarantine_skipped_details]
         stop_routing_now = False
 
         for candidate_index, candidate in enumerate(candidates):
@@ -502,6 +576,7 @@ class RoutingEngine:
                         latency_ms = (time.perf_counter() - start) * 1000
 
                         self.key_registry.record_success(key.id, latency_ms)
+                        self._record_model_success(config, candidate, latency_ms)
                         self.stats_repo.record_request(
                             provider=candidate.provider,
                             key_id=key.id,
@@ -564,6 +639,7 @@ class RoutingEngine:
                         final_error = gateway_error
 
                         self.key_registry.record_failure(key, error_class, error_message)
+                        self._record_model_failure(config, candidate, error_class, error_message)
                         self.stats_repo.record_request(
                             provider=candidate.provider,
                             key_id=key.id,
@@ -734,6 +810,7 @@ class RoutingEngine:
             profile=route_profile,
             context_bucket=context_bucket,
         )
+        candidates, quarantine_skipped_details = self._filter_quarantined_candidates(config, candidates)
         candidates, free_alias_detail = self._apply_free_alias_budget(
             config,
             candidates,
@@ -754,7 +831,7 @@ class RoutingEngine:
         runtime_states = {s["key_id"]: s for s in self.key_registry.runtime_repo.list_states()}
         final_error: GatewayError | None = None
         attempt_index = 0
-        candidate_details: list[dict] = list(context_skipped_details)
+        candidate_details: list[dict] = [*context_skipped_details, *quarantine_skipped_details]
         stop_routing_now = False
 
         for candidate_index, candidate in enumerate(candidates):
@@ -806,6 +883,7 @@ class RoutingEngine:
                         latency_ms = (time.perf_counter() - start) * 1000
 
                         self.key_registry.record_success(key.id, latency_ms)
+                        self._record_model_success(config, candidate, latency_ms)
                         self.stats_repo.record_request(
                             provider=candidate.provider,
                             key_id=key.id,
@@ -869,6 +947,7 @@ class RoutingEngine:
                         )
                         final_error = gateway_error
                         self.key_registry.record_failure(key, error_class, error_message)
+                        self._record_model_failure(config, candidate, error_class, error_message)
                         self.stats_repo.record_request(
                             provider=candidate.provider,
                             key_id=key.id,
@@ -923,6 +1002,7 @@ class RoutingEngine:
                         )
                         final_error = gateway_error
                         self.key_registry.record_failure(key, error_class, error_message)
+                        self._record_model_failure(config, candidate, error_class, error_message)
                         self.stats_repo.record_request(
                             provider=candidate.provider,
                             key_id=key.id,

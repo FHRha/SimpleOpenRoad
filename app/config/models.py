@@ -59,11 +59,36 @@ class FreeAliasRoutingConfig(BaseModel):
     stop_on_provider_free_tier_rate_limit: bool = True
 
 
+class ModelQuarantineOverrideConfig(BaseModel):
+    provider: str | None = None
+    model_pattern: str = "*"
+    failure_threshold: int | None = None
+    ttl_seconds: int | None = None
+
+
+class ModelQuarantineConfig(BaseModel):
+    enabled: bool = True
+    failure_threshold: int = 3
+    default_ttl_seconds: int = 1800
+    error_ttl_seconds: dict[str, int] = Field(
+        default_factory=lambda: {
+            "rate_limit": 1800,
+            "provider_unavailable": 600,
+            "network_timeout": 300,
+            "malformed_response": 21600,
+            "unsupported_model": 86400,
+            "unknown": 1800,
+        }
+    )
+    overrides: list[ModelQuarantineOverrideConfig] = Field(default_factory=list)
+
+
 class RoutingConfig(BaseModel):
     default_strategy: str = ROUTE_STRICT_PRIORITY
     retry: RetryConfig = Field(default_factory=RetryConfig)
     error_policy: ErrorPolicyConfig = Field(default_factory=ErrorPolicyConfig)
     free_alias: FreeAliasRoutingConfig = Field(default_factory=FreeAliasRoutingConfig)
+    model_quarantine: ModelQuarantineConfig = Field(default_factory=ModelQuarantineConfig)
 
 
 class ModelCapabilitiesConfig(BaseModel):

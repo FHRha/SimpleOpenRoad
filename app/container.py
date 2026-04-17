@@ -17,6 +17,7 @@ from app.storage.db import SQLiteDB
 from app.storage.repositories.attempts_repo import AttemptsRepository
 from app.storage.repositories.health_repo import HealthRepository
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
+from app.storage.repositories.model_runtime_repo import ModelRuntimeRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
 
@@ -34,6 +35,7 @@ class AppContainer:
         self.health_repo = HealthRepository(self.db)
         self.attempts_repo = AttemptsRepository(self.db)
         self.route_memory_repo = RouteModelMemoryRepository(self.db)
+        self.model_runtime_repo = ModelRuntimeRepository(self.db)
         self.stats_repo = StatsRepository(self.db)
 
         self.key_registry = KeyRegistry(self.keys_repo)
@@ -48,6 +50,7 @@ class AppContainer:
             key_registry=self.key_registry,
             attempts_repo=self.attempts_repo,
             route_memory_repo=self.route_memory_repo,
+            model_runtime_repo=self.model_runtime_repo,
             stats_repo=self.stats_repo,
             inventory_discovery=self.inventory_discovery,
         )

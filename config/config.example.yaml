@@ -24,9 +24,21 @@ routing:
     network_timeout: retry_then_switch_key
     malformed_response: switch_provider
     unsupported_model: switch_provider
-  free_alias:
-    max_candidates_per_request: 3
-    stop_on_provider_free_tier_rate_limit: true
+    free_alias:
+      max_candidates_per_request: 3
+      stop_on_provider_free_tier_rate_limit: true
+    model_quarantine:
+      enabled: true
+      failure_threshold: 3
+      default_ttl_seconds: 1800
+      error_ttl_seconds:
+        rate_limit: 1800
+        provider_unavailable: 600
+        network_timeout: 300
+        malformed_response: 21600
+        unsupported_model: 86400
+        unknown: 1800
+      overrides: []
 
 model_capabilities:
   tool_capable:

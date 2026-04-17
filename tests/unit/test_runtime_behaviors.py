@@ -20,6 +20,7 @@ from app.storage.db import SQLiteDB
 from app.storage.repositories.attempts_repo import AttemptsRepository
 from app.storage.repositories.health_repo import HealthRepository
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
+from app.storage.repositories.model_runtime_repo import ModelRuntimeRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.storage.repositories.stats_repo import StatsRepository
 
@@ -194,6 +195,7 @@ def _build_engine(tmp_path: Path, save_attempt_events: bool = True) -> tuple[Rou
     keys_repo = KeysRuntimeRepository(db)
     attempts_repo = AttemptsRepository(db)
     route_memory_repo = RouteModelMemoryRepository(db)
+    model_runtime_repo = ModelRuntimeRepository(db)
     stats_repo = StatsRepository(db)
     key_registry = KeyRegistry(keys_repo)
     key_registry.sync_defaults(runtime_config.get())
@@ -204,6 +206,7 @@ def _build_engine(tmp_path: Path, save_attempt_events: bool = True) -> tuple[Rou
         key_registry=key_registry,
         attempts_repo=attempts_repo,
         route_memory_repo=route_memory_repo,
+        model_runtime_repo=model_runtime_repo,
         stats_repo=stats_repo,
         inventory_discovery=inventory_discovery,
     )
@@ -340,6 +343,80 @@ async def test_router_prefers_keys_that_discovered_the_candidate_model(tmp_path:
 
     assert payload["model"] == "p1/m1"
     assert decision.selected_key_id == "p1-low"
+
+
+@pytest.mark.asyncio
+async def test_router_skips_quarantined_model_candidates(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    assert engine.model_runtime_repo is not None
+    engine.model_runtime_repo.record_failure(
+        provider="p1",
+        model="m1",
+        error_class=ErrorClass.UNSUPPORTED_MODEL,
+        error_message="unsupported",
+        failure_threshold=1,
+        ttl_seconds=600,
+    )
+
+    request = UnifiedLLMRequest(model="custom/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="custom/fast", stream=False)
+    payload, decision = await engine.route_chat_completion(request, context)
+
+    assert payload["model"] == "p1/m2"
+    assert [attempt.model for attempt in decision.attempts] == ["m2"]
+
+
+@pytest.mark.asyncio
+async def test_router_records_model_quarantine_after_failures(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    assert engine.model_runtime_repo is not None
+    engine.runtime_config.get().routing.model_quarantine.failure_threshold = 1
+    engine.runtime_config.get().routing.model_quarantine.error_ttl_seconds["unsupported_model"] = 600
+    engine.providers = {"p1": AlwaysGatewayErrorAdapter(error_class=ErrorClass.UNSUPPORTED_MODEL)}
+    engine.inventory_discovery.refresh_providers(engine.providers)
+
+    request = UnifiedLLMRequest(model="p1/m1", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias=None, stream=False)
+
+    with pytest.raises(GatewayError):
+        await engine.route_chat_completion(request, context)
+
+    state = engine.model_runtime_repo.get_state("p1", "m1")
+    assert state is not None
+    assert int(state["consecutive_failures"]) == 1
+    assert state["last_error_class"] == ErrorClass.UNSUPPORTED_MODEL.value
+    assert state["quarantined_until"]
+
+
+@pytest.mark.asyncio
+async def test_router_reports_quarantined_candidates_in_diagnostics(tmp_path: Path) -> None:
+    engine, _, _ = _build_engine(tmp_path)
+    assert engine.model_runtime_repo is not None
+    engine.model_runtime_repo.record_failure(
+        provider="p1",
+        model="m1",
+        error_class=ErrorClass.UNSUPPORTED_MODEL,
+        error_message="unsupported",
+        failure_threshold=1,
+        ttl_seconds=600,
+    )
+    engine.model_runtime_repo.record_failure(
+        provider="p1",
+        model="m2",
+        error_class=ErrorClass.UNSUPPORTED_MODEL,
+        error_message="unsupported",
+        failure_threshold=1,
+        ttl_seconds=600,
+    )
+
+    request = UnifiedLLMRequest(model="custom/fast", messages=[ChatMessage(role="user", content="hello")])
+    context = engine.build_context(route_alias="custom/fast", stream=False)
+
+    with pytest.raises(GatewayError) as exc_info:
+        await engine.route_chat_completion(request, context)
+
+    candidates = exc_info.value.details["candidates"] if exc_info.value.details else []
+    assert [item["reason"] for item in candidates] == ["model_quarantined", "model_quarantined"]
 
 
 @pytest.mark.asyncio
