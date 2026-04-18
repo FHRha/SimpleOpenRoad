@@ -176,6 +176,39 @@ providers:
 
 Lower provider `priority` values are ordered earlier in generated global aliases.
 
+Built-in OpenAI-compatible providers use the shared transport with fixed provider names and default endpoints. This includes `openai`, `anthropic`, `bedrock`, `perplexity`, `novita`, `naga`, `nebius`, `near_ai`, `friendli`, `fastrouter`, `crusoe`, `atoma`, `parasail`, `inference_net`, `aai`, `aimlapi`, `vultr`, `mistral`, `deepseek`, `xai`, `cohere`, `moonshot`, `sambanova`, `nvidia`, `zhipuai`, `zai`, `featherless`, `hyperbolic`, `ovhcloud`, `fireworks`, `deepinfra`, `siliconflow`, and `huggingface`.
+
+`azure_openai` is built in but is not a normal `/v1` provider. It uses Azure's `api-key` header and deployment-scoped URLs where the requested model id is treated as the deployment name.
+
+`bedrock` is built in with Amazon Bedrock's OpenAI-compatible endpoint. It uses a Bedrock API key directly in the normal Bearer auth flow.
+
+`vertex_ai` is built in with Vertex AI's OpenAI-compatible endpoint, but the `key` field is interpreted specially:
+
+- `adc` uses Google Application Default Credentials;
+- a path ending in `.json` uses that service account file;
+- any other value is treated as a direct Bearer access token.
+
+`baseten` is also built in with OpenAI-compatible paths, but uses `Authorization: Api-Key <TOKEN>` instead of Bearer auth.
+
+Custom OpenAI-compatible providers can use the shared adapter:
+
+```yaml
+providers:
+  local_vllm:
+    enabled: true
+    adapter: openai_compatible
+    display_name: Local vLLM
+    endpoint: http://127.0.0.1:8000/v1
+    auth_required: false
+    keys:
+      - id: local-vllm
+        key: local
+```
+
+When `auth_required: false`, the key value is not sent upstream, but the router still needs one key record for selection and diagnostics.
+
+Local presets such as `ollama`, `lmstudio`, `localai`, `vllm`, `jan`, `llamacpp`, `textgenwebui`, and `litellm` use the same `openai_compatible` adapter and are disabled by default in the example config.
+
 Cloudflare supports account IDs at provider or key level:
 
 ```yaml

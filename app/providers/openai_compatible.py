@@ -32,9 +32,10 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
     def _build_headers(self, key: KeyConfig) -> dict[str, str]:
         headers = {
-            "Authorization": f"Bearer {key.key}",
             "Content-Type": "application/json",
         }
+        if self.config.auth_required:
+            headers["Authorization"] = f"Bearer {key.key}"
         headers.update(self.extra_headers)
         headers.update(self.config.headers)
         return headers

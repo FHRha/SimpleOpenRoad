@@ -182,6 +182,9 @@ class ProviderConfig(BaseModel):
     enabled: bool = True
     priority: int = 100
     endpoint: str
+    adapter: str | None = None
+    display_name: str | None = None
+    auth_required: bool = True
     account_id: str | None = None
     timeout_seconds: int = 45
     headers: dict[str, str] = Field(default_factory=dict)

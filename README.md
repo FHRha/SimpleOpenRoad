@@ -4,6 +4,9 @@ Self-hosted OpenAI-compatible AI gateway with automatic routing, provider failov
 
 Run one stable `/v1` endpoint for your apps and coding agents while SimpleOpenRoad routes requests across providers such as Gemini, GitHub Models, Groq, Cloudflare Workers AI, OpenRouter, Together AI, and Cerebras.
 
+> [!WARNING]
+> Provider support in SimpleOpenRoad means the adapter, routing, and inventory integration exist in the project. It does not guarantee that every listed provider or every discovered model will work correctly in every account. Real behavior still depends on provider-side billing, region limits, account permissions, deployment settings, model availability, and upstream API changes. Validate the providers you actually plan to use with `sor providers test`, `sor providers inventory --refresh`, and route preview before relying on them in production.
+
 ## Why Use It
 
 SimpleOpenRoad is useful when your tools expect an OpenAI-compatible API, but you do not want to depend on one provider, one key, or one model.
@@ -135,13 +138,51 @@ If you send an exact model id without `provider/`, SimpleOpenRoad tries that mod
 
 | Provider | Notes |
 |---|---|
+| [OpenAI](https://platform.openai.com/settings/organization/api-keys) | First-class OpenAI API adapter for chat, streaming, responses, tools, and model inventory. |
+| [Anthropic](https://console.anthropic.com/settings/keys) | Claude through Anthropic's OpenAI-compatible endpoint for chat, streaming, tools, and model inventory. |
+| [Azure OpenAI](https://portal.azure.com/) | Deployment-scoped Azure OpenAI chat adapter using `api-key` auth and Azure `api-version` URLs. |
+| [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html) | OpenAI-compatible Bedrock runtime endpoint using Amazon Bedrock API keys. |
+| [Google Vertex AI](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | OpenAI-compatible Vertex endpoint using Google Cloud auth, access tokens, or service account credentials. |
 | [Gemini](https://aistudio.google.com/apikey) | Native adapter for Google Gemini models. Create or view keys in Google AI Studio. |
 | [GitHub Models](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) | OpenAI-compatible chat and catalog adapter. Uses GitHub personal access tokens. |
+| [Mistral AI](https://console.mistral.ai/api-keys) | OpenAI-compatible chat, streaming, and model inventory. |
 | [Groq](https://console.groq.com/keys) | OpenAI-compatible chat and streaming. Create keys in GroqCloud. |
+| [DeepSeek](https://platform.deepseek.com/api_keys) | OpenAI-compatible chat and reasoning models. |
+| [xAI](https://console.x.ai/) | OpenAI-compatible Grok chat/responses endpoint. |
+| [Cohere](https://dashboard.cohere.com/api-keys) | OpenAI-compatible Cohere compatibility API for chat, streaming, tools, embeddings, and transcription surfaces. |
+| [Moonshot AI / Kimi](https://platform.moonshot.ai/console/api-keys) | OpenAI-compatible Kimi endpoint for chat and long-context models. |
+| [SambaNova](https://cloud.sambanova.ai/apis) | OpenAI-compatible SambaCloud endpoint. |
+| [NVIDIA NIM](https://build.nvidia.com/) | OpenAI-compatible hosted NIM endpoint through NVIDIA build/integrate APIs. |
+| [ZhipuAI / BigModel](https://bigmodel.cn/usercenter/proj-mgmt/apikeys) | OpenAI-compatible GLM endpoint from ZhipuAI. |
+| [Z.AI](https://z.ai/manage-apikey/apikey-list) | OpenAI-compatible GLM endpoint from Z.AI. |
+| [Featherless](https://featherless.ai/account/api-keys) | OpenAI-compatible hosted open-model catalog. |
+| [Hyperbolic](https://app.hyperbolic.xyz/settings) | OpenAI-compatible inference endpoint for Hyperbolic-hosted models. |
+| [OVHcloud AI Endpoints](https://www.ovhcloud.com/en/public-cloud/ai-endpoints/) | OpenAI-compatible European hosted AI endpoints. |
+| [Perplexity](https://www.perplexity.ai/settings/api) | Perplexity Sonar/Agent API support for search-grounded chat and OpenAI-compatible model discovery. |
+| [Novita AI](https://novita.ai/settings/key-management) | OpenAI-compatible hosted LLM endpoint. |
+| [Baseten](https://app.baseten.co/settings/api_keys) | OpenAI-compatible Baseten Model APIs; uses Baseten's `Api-Key` auth scheme. |
+| [NagaAI](https://docs.naga.ac/) | OpenAI-compatible chat, streaming, tools, multimodal, and model catalog surfaces. |
+| [Nebius Token Factory](https://tokenfactory.nebius.com/) | OpenAI-compatible inference endpoint for Nebius-hosted models. |
+| [Friendli](https://friendli.ai/docs/guides/openai-compatibility) | OpenAI-compatible serverless and dedicated endpoints. |
+| [FastRouter](https://docs.fastrouter.ai/api-reference/chat-request-api) | OpenAI-compatible routing endpoint for multi-provider model ids. |
+| [Crusoe Managed Inference](https://docs.crusoecloud.com/managed-inference/getting-started-with-managed-inference/) | OpenAI-compatible Crusoe text model inference. |
+| [Atoma](https://docs.atoma.ai/cloud-api-reference/get-started) | OpenAI-compatible decentralized inference API. |
+| [Parasail](https://docs.parasail.io/parasail-docs/batch/api-reference) | OpenAI-compatible serverless model endpoint. |
+| [Inference.net](https://docs.inference.net/api/overview) | OpenAI-compatible hosted inference API for chat, streaming, tools, vision, and embeddings. |
+| [NEAR AI Cloud](https://docs.near.ai/cloud/guides/openai-compatibility/) | OpenAI-compatible gateway and direct-completions endpoints. |
+| [a.ai](https://chat.a.ai/api) | OpenAI-compatible `chat/completions` and `models` API for apex-1. |
+| [AI/ML API](https://docs.aimlapi.com/integrations/aider) | OpenAI-compatible multi-provider routing endpoint. |
+| [Vultr Serverless Inference](https://docs.vultr.com/how-to-use-vultr-cloud-inference-in-node-js) | OpenAI-compatible Vultr hosted inference API. |
 | [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) | Account-scoped Workers AI support; Cloudflare account ID can be stored per key. |
 | [OpenRouter](https://openrouter.ai/settings/keys) | OpenAI-compatible routing and special handling for free-tier routes. |
 | [Together AI](https://docs.together.ai/docs/api-keys-authentication) | OpenAI-compatible catalog and chat; available models depend on account billing and provider availability. |
 | [Cerebras](https://inference-docs.cerebras.ai/api-reference/authentication) | OpenAI-compatible chat support. Create keys in the Cerebras Inference Cloud Console. |
+| [Fireworks AI](https://docs.fireworks.ai/api-reference/introduction) | OpenAI-compatible inference endpoint for Fireworks-hosted models. |
+| [DeepInfra](https://deepinfra.com/dash/api_keys) | OpenAI-compatible hosted open-model inference endpoint. |
+| [SiliconFlow](https://cloud.siliconflow.cn/account/ak) | OpenAI-compatible SiliconCloud endpoint. |
+| [Hugging Face Inference Providers](https://huggingface.co/settings/tokens) | OpenAI-compatible router for Hugging Face Inference Providers. |
+| Local presets | Disabled-by-default presets for Ollama, LM Studio, LocalAI, vLLM, Jan, llama.cpp server, text-generation-webui, and LiteLLM Proxy. |
+| Custom OpenAI-compatible | Connect local or hosted OpenAI-compatible endpoints such as vLLM, LM Studio, or LocalAI. |
 
 See [docs/PROVIDERS.md](docs/PROVIDERS.md) for provider-specific setup and caveats.
 

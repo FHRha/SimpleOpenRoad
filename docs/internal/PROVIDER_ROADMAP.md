@@ -16,13 +16,38 @@ It is a planning document, not a support matrix. Current supported providers are
 
 | Provider | Category | Notes |
 |---|---|---|
+| OpenAI | Known | First-class OpenAI API adapter. |
 | Gemini | Known | Native Google AI Studio adapter. |
+| Azure OpenAI | Known / Enterprise | Deployment-scoped Azure OpenAI adapter. |
+| Amazon Bedrock | Known / Enterprise | Bedrock OpenAI-compatible endpoint with Bedrock API key auth. |
+| Google Vertex AI | Known / Enterprise | Vertex OpenAI-compatible endpoint with ADC, service account, or direct token auth. |
 | GitHub Models | Known | OpenAI-compatible, needs GitHub token permissions. |
+| Mistral AI | Known | OpenAI-compatible hosted provider. |
 | Groq | Known | OpenAI-compatible, fast hosted inference. |
+| DeepSeek | Known | OpenAI-compatible chat/reasoning provider. |
+| xAI | Known | OpenAI-compatible Grok endpoint. |
 | Cloudflare Workers AI | Known | Account-scoped Workers AI, key-level account IDs supported. |
 | OpenRouter | Known / Free-friendly | Aggregator, supports free-suffixed routes and special routes. |
 | Together AI | Ordinary hosted inference | Large catalog, account billing/model availability varies. |
 | Cerebras | Ordinary hosted inference | OpenAI-compatible inference cloud. |
+| Fireworks AI | Ordinary hosted inference | OpenAI-compatible hosted open-model inference. |
+| DeepInfra | Ordinary hosted inference | OpenAI-compatible hosted open-model inference. |
+| Perplexity | Search / hosted inference | Sonar chat and Agent API model discovery. |
+| Novita AI | Ordinary hosted inference | OpenAI-compatible hosted LLM endpoint. |
+| Baseten | Ordinary hosted inference | OpenAI-compatible Model APIs with Api-Key auth. |
+| NagaAI | Ordinary hosted inference | OpenAI-compatible chat, tools, multimodal, and catalog endpoint. |
+| Nebius Token Factory | Ordinary hosted inference | OpenAI-compatible hosted model inference. |
+| Friendli | Ordinary hosted inference | OpenAI-compatible serverless and dedicated endpoints. |
+| FastRouter | Ordinary hosted inference | OpenAI-compatible multi-provider router. |
+| Crusoe Managed Inference | Ordinary hosted inference | OpenAI-compatible Crusoe text inference. |
+| Atoma | Ordinary hosted inference | OpenAI-compatible decentralized inference API. |
+| Parasail | Ordinary hosted inference | OpenAI-compatible serverless model endpoint. |
+| Inference.net | Ordinary hosted inference | OpenAI-compatible hosted inference API. |
+| NEAR AI Cloud | Ordinary hosted inference | OpenAI-compatible gateway and direct-completions endpoints. |
+| a.ai | Ordinary hosted inference | OpenAI-compatible apex model API. |
+| AI/ML API | Ordinary hosted inference | OpenAI-compatible multi-provider endpoint. |
+| Vultr Serverless Inference | Ordinary hosted inference | OpenAI-compatible Vultr inference API. |
+| Custom OpenAI-compatible | Local / self-hosted | Shared adapter for vLLM, LM Studio, LocalAI, and compatible endpoints. |
 
 ## Provider Categories
 
@@ -35,9 +60,9 @@ Initial candidates:
 - OpenAI
 - Anthropic
 - Azure OpenAI
+- Amazon Bedrock
 - Google Gemini
 - Google Vertex AI
-- AWS Bedrock
 - OpenRouter
 - GitHub Models
 - Groq
@@ -95,6 +120,19 @@ Candidates:
 - DeepInfra
 - NVIDIA NIM
 - Novita AI
+- Baseten
+- NagaAI
+- Nebius Token Factory
+- Friendli
+- FastRouter
+- Crusoe Managed Inference
+- Atoma
+- Parasail
+- Inference.net
+- NEAR AI Cloud
+- a.ai
+- AI/ML API
+- Vultr Serverless Inference
 - SambaNova
 - Moonshot AI / Kimi
 - ZhipuAI / GLM
@@ -147,13 +185,13 @@ Implementation direction:
 
 ### Phase 1: Low Adapter Cost, High User Value
 
-1. OpenAI
-2. Mistral AI
-3. DeepSeek
-4. xAI
-5. Fireworks AI
-6. DeepInfra
-7. generic OpenAI-compatible provider
+1. OpenAI - done
+2. Mistral AI - done
+3. DeepSeek - done
+4. xAI - done
+5. Fireworks AI - done
+6. DeepInfra - done
+7. generic OpenAI-compatible provider - initial support done with `adapter: openai_compatible`
 
 Reasoning:
 
@@ -164,10 +202,10 @@ Reasoning:
 ### Phase 2: Native / Important Providers
 
 1. Anthropic
-2. Azure OpenAI
+2. Azure OpenAI - done
 3. Ollama
 4. LM Studio / LocalAI / vLLM presets
-5. Perplexity
+5. Perplexity - done
 
 Reasoning:
 
@@ -178,8 +216,8 @@ Reasoning:
 
 ### Phase 3: Enterprise and Specialized Providers
 
-1. AWS Bedrock
-2. Google Vertex AI
+1. AWS Bedrock - done
+2. Google Vertex AI - done
 3. NVIDIA NIM
 4. Cohere
 5. Voyage / Jina / rerank providers

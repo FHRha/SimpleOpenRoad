@@ -145,6 +145,23 @@ Use `provider/model` when you want to force one provider:
 openrouter/openai/gpt-5.4-mini
 cloudflare/@cf/openai/gpt-oss-20b
 together/arize-ai/qwen-2-1.5b-instruct
+anthropic/claude-sonnet-4-6
+deepseek/deepseek-chat
+xai/grok-4.20-reasoning
+cohere/command-a-03-2025
+moonshot/kimi-k2-0905-preview
+zhipuai/glm-5
+zai/GLM-4.5-air
+featherless/zai-org/GLM-4.7
+hyperbolic/Qwen/Qwen3-Coder-480B-A35B-Instruct
+ovhcloud/Meta-Llama-3_3-70B-Instruct
+fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct
+huggingface/openai/gpt-oss-120b:fastest
+ollama/gpt-oss:20b
+jan/local-model-id
+llamacpp/local-model-id
+textgenwebui/local-model-id
+litellm/gpt-4o-mini
 ```
 
 Use generated aliases when you want failover:

@@ -48,6 +48,15 @@ from app.storage.db import SQLiteDB
 from app.storage.repositories.keys_repo import KeysRuntimeRepository
 from app.storage.repositories.model_runtime_repo import ModelRuntimeRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
+from app.providers.metadata import (
+    FEATURED_PROVIDER_ORDER,
+    FEATURED_PROVIDER_SET,
+    OTHER_PROVIDER_DISPLAY_LIMIT,
+    provider_category,
+    provider_display_name,
+    search_provider_names,
+    sorted_provider_names,
+)
 
 cli_app = typer.Typer(
     help="SimpleOpenRoad AI gateway CLI",
@@ -69,16 +78,6 @@ cli_app.add_typer(logs_app, name="logs")
 cli_app.add_typer(service_app, name="service")
 
 console = Console()
-
-FEATURED_PROVIDER_ORDER = [
-    "gemini",
-    "github",
-    "openrouter",
-    "groq",
-    "cloudflare",
-]
-
-FEATURED_PROVIDER_SET = set(FEATURED_PROVIDER_ORDER)
 
 SERVICE_NAME = "sor"
 _ROUTE_STRATEGY_OPTIONS = [
@@ -1255,27 +1254,34 @@ def _resolve_local_api_base_url(cfg: GatewayConfig) -> str:
 
 
 def _provider_category(provider_name: str) -> str:
-    return "Featured" if provider_name in FEATURED_PROVIDER_SET else "Other"
+    return provider_category(provider_name)
+
+
+def _provider_display_name(provider_name: str) -> str:
+    return provider_display_name(provider_name)
 
 
 def _sorted_provider_names(provider_names: list[str]) -> list[str]:
-    featured_index = {name: index for index, name in enumerate(FEATURED_PROVIDER_ORDER)}
-    return sorted(
-        provider_names,
-        key=lambda name: (
-            0 if name in FEATURED_PROVIDER_SET else 1,
-            featured_index.get(name, 999),
-            name,
-        ),
-    )
+    return sorted_provider_names(provider_names)
+
+
+def _search_provider_names(provider_names: list[str], query: str) -> list[str]:
+    if not query.strip():
+        return []
+    return search_provider_names(provider_names, query)
 
 
 def _print_provider_choices(provider_names: list[str]) -> list[str]:
     ordered = _sorted_provider_names(provider_names)
+    featured = [name for name in ordered if name in FEATURED_PROVIDER_SET]
+    other = [name for name in ordered if name not in FEATURED_PROVIDER_SET]
+    hidden_other_count = max(0, len(other) - OTHER_PROVIDER_DISPLAY_LIMIT)
+    displayed_other = other[:OTHER_PROVIDER_DISPLAY_LIMIT]
     groups = [
-        ("Featured providers", [name for name in ordered if name in FEATURED_PROVIDER_SET]),
-        ("Other providers", [name for name in ordered if name not in FEATURED_PROVIDER_SET]),
+        ("Featured providers", featured),
+        ("Other providers", displayed_other),
     ]
+    displayed: list[str] = []
     index = 1
     for title, items in groups:
         console.print(f"--- {title} ---")
@@ -1283,9 +1289,42 @@ def _print_provider_choices(provider_names: list[str]) -> list[str]:
             console.print("<none>")
             continue
         for provider in items:
-            console.print(f"{index}) {provider}")
+            console.print(f"{index}) {provider} - {_provider_display_name(provider)}")
+            displayed.append(provider)
             index += 1
-    return ordered
+    if hidden_other_count:
+        console.print(f"... {hidden_other_count} more provider(s). Use S to search or M for manual provider id.")
+    console.print("S) Search provider")
+    console.print("M) Manual provider id")
+    return displayed
+
+
+def _select_provider_from_names(provider_names: list[str], prompt: str = "Select provider") -> str:
+    if not provider_names:
+        raise typer.BadParameter("No providers configured")
+    provider_set = set(provider_names)
+    displayed = _print_provider_choices(provider_names)
+    raw_choice = typer.prompt(prompt, default="1").strip()
+    normalized = raw_choice.lower()
+    if normalized == "s":
+        query = typer.prompt("Search provider").strip()
+        matches = _search_provider_names(provider_names, query)
+        if not matches:
+            raise typer.BadParameter(f"No provider matches: {query}")
+        displayed_matches = _print_provider_choices(matches)
+        selected = _prompt_numbered_choice(len(displayed_matches), "Provider number")
+        return displayed_matches[selected - 1]
+    if normalized == "m":
+        provider = typer.prompt("Provider id").strip()
+        if provider not in provider_set:
+            raise typer.BadParameter(f"Provider is not configured: {provider}")
+        return provider
+    if not raw_choice.isdigit():
+        raise typer.BadParameter("Provider selection must be a number, S, or M")
+    selected_index = int(raw_choice)
+    if selected_index < 1 or selected_index > len(displayed):
+        raise typer.BadParameter("Selected provider index is out of range. Use S to search hidden providers.")
+    return displayed[selected_index - 1]
 
 
 def _current_master_api_key() -> str:
@@ -2088,15 +2127,7 @@ def _interactive_add_provider_key(config_path: str) -> None:
     if not isinstance(providers, dict) or not providers:
         raise typer.BadParameter("No providers configured. Add providers in config first.")
 
-    provider_names = _print_provider_choices([str(name) for name in providers.keys()])
-
-    raw_choice = typer.prompt("Select provider", default="1").strip()
-    if not raw_choice.isdigit():
-        raise typer.BadParameter("Provider selection must be a number")
-    selected_index = int(raw_choice)
-    if selected_index < 1 or selected_index > len(provider_names):
-        raise typer.BadParameter("Selected provider index is out of range")
-    provider = provider_names[selected_index - 1]
+    provider = _select_provider_from_names([str(name) for name in providers.keys()])
     if provider == "cloudflare":
         existing_account_id = str(providers.get(provider, {}).get("account_id", "") or "").strip()
         account_id = typer.prompt(
@@ -3279,12 +3310,7 @@ def _remove_custom_alias(config_path: str) -> None:
 
 def _select_provider_name(config_path: str) -> str:
     cfg = load_gateway_config(config_path=config_path)
-    provider_names = _sorted_provider_names(list(cfg.providers))
-    if not provider_names:
-        raise typer.BadParameter("No providers configured")
-    _print_provider_choices(provider_names)
-    selected = _prompt_numbered_choice(len(provider_names), "Provider number")
-    return provider_names[selected - 1]
+    return _select_provider_from_names(list(cfg.providers), prompt="Provider number")
 
 
 def _select_option_from_list(title: str, options: list[str], prompt: str) -> str:
