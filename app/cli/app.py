@@ -2248,7 +2248,10 @@ def doctor(config_path: str = typer.Option("config/config.yaml", help="Path to c
 
 
 @providers_app.command("list")
-def providers_list(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
+def providers_list(
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+    all_providers: bool = typer.Option(False, "--all", help="Show the full provider catalog, including providers without configured keys"),
+) -> None:
     container = _container(config_path)
     rows = sorted(
         container.admin_service.list_providers(),
@@ -2258,13 +2261,17 @@ def providers_list(config_path: str = typer.Option("config/config.yaml", help="P
             str(row["name"]),
         ),
     )
-    table = Table(title="Providers")
+    if not all_providers:
+        rows = [row for row in rows if int(row.get("keys_count", 0) or 0) > 0]
+    table = Table(title="Providers" if all_providers else "Providers With Configured Keys")
     table.add_column("Category")
     table.add_column("Name")
     table.add_column("Enabled")
     table.add_column("Priority")
     table.add_column("Endpoint")
     table.add_column("Keys")
+    if not rows:
+        table.add_row("-", "<empty>", "-", "-", "-", "0")
     for row in rows:
         table.add_row(
             _provider_category(str(row["name"])),
@@ -4510,9 +4517,10 @@ def _run_keys_view_panel(config_path: str) -> None:
             title="SimpleOpenRoad / Providers and Keys / View",
             config_path=config_path,
             lines=[
-                "1) List providers",
+                "1) List providers with configured keys",
                 "2) List configured keys",
                 "3) List all keys including placeholders",
+                "4) List full provider catalog",
                 "0) Back",
             ],
         )
@@ -4526,6 +4534,9 @@ def _run_keys_view_panel(config_path: str) -> None:
                 _pause()
             elif choice == "3":
                 keys_list(config_path=config_path, all_keys=True)
+                _pause()
+            elif choice == "4":
+                providers_list(config_path=config_path, all_providers=True)
                 _pause()
             elif choice == "0":
                 return
