@@ -1836,6 +1836,55 @@ def test_cli_providers_list_all_includes_unconfigured_provider_catalog_entries(t
     assert "gemini" in result.stdout
 
 
+def test_cli_manage_existing_key_only_lists_providers_with_configured_keys(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["providers"]["gemini"] = {
+        "enabled": True,
+        "priority": 10,
+        "endpoint": "https://generativelanguage.googleapis.com",
+        "keys": [{"id": "gemini-main", "key": "${GEMINI_API_KEY}"}],
+    }
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="2\n4\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "github" in result.stdout
+    assert "openrouter" in result.stdout
+    assert "gemini" not in result.stdout
+
+
+def test_cli_keys_view_panel_lists_only_providers_with_configured_keys(tmp_path: Path) -> None:
+    runner = CliRunner()
+    config_path = _write_config(tmp_path)
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["providers"]["gemini"] = {
+        "enabled": True,
+        "priority": 10,
+        "endpoint": "https://generativelanguage.googleapis.com",
+        "keys": [{"id": "gemini-main", "key": "${GEMINI_API_KEY}"}],
+    }
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    result = runner.invoke(
+        cli_app,
+        ["panel", "--config-path", str(config_path)],
+        input="2\n2\n1\n\n0\n0\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Providers With Configured Keys" in result.stdout
+    assert "github" in result.stdout
+    assert "openrouter" in result.stdout
+    assert "gemini" not in result.stdout
+
+
 def test_api_base_url_prefers_public_domain(monkeypatch, tmp_path: Path) -> None:
     config_path = _write_config(tmp_path)
     cfg = load_gateway_config(str(config_path))

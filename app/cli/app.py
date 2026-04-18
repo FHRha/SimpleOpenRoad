@@ -2252,6 +2252,7 @@ def providers_list(
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
     all_providers: bool = typer.Option(False, "--all", help="Show the full provider catalog, including providers without configured keys"),
 ) -> None:
+    show_all = all_providers if isinstance(all_providers, bool) else False
     container = _container(config_path)
     rows = sorted(
         container.admin_service.list_providers(),
@@ -2261,9 +2262,9 @@ def providers_list(
             str(row["name"]),
         ),
     )
-    if not all_providers:
+    if not show_all:
         rows = [row for row in rows if int(row.get("keys_count", 0) or 0) > 0]
-    table = Table(title="Providers" if all_providers else "Providers With Configured Keys")
+    table = Table(title="Providers" if show_all else "Providers With Configured Keys")
     table.add_column("Category")
     table.add_column("Name")
     table.add_column("Enabled")
@@ -3320,6 +3321,19 @@ def _select_provider_name(config_path: str) -> str:
     return _select_provider_from_names(list(cfg.providers), prompt="Provider number")
 
 
+def _select_provider_name_with_configured_keys(config_path: str) -> str | None:
+    cfg = load_gateway_config(config_path=config_path)
+    provider_names = [
+        provider_name
+        for provider_name, provider_cfg in cfg.providers.items()
+        if any(is_configured_secret(key.key) for key in provider_cfg.keys)
+    ]
+    if not provider_names:
+        console.print("No providers with configured keys are available")
+        return None
+    return _select_provider_from_names(provider_names, prompt="Provider number")
+
+
 def _select_option_from_list(title: str, options: list[str], prompt: str) -> str:
     _print_numbered_items(title, options)
     selected = _prompt_numbered_choice(len(options), prompt)
@@ -3522,7 +3536,9 @@ def _update_provider_key(config_path: str, provider_name: str, key_index: int, k
 
 
 def _select_provider_and_key(config_path: str) -> tuple[str | None, int | None, dict[str, Any] | None]:
-    provider_name = _select_provider_name(config_path)
+    provider_name = _select_provider_name_with_configured_keys(config_path)
+    if provider_name is None:
+        return None, None, None
     key_index, key_data = _select_provider_key(config_path, provider_name)
     return provider_name, key_index, key_data
 
@@ -4527,7 +4543,7 @@ def _run_keys_view_panel(config_path: str) -> None:
         choice = _prompt_menu_choice()
         try:
             if choice == "1":
-                providers_list(config_path=config_path)
+                providers_list(config_path=config_path, all_providers=False)
                 _pause()
             elif choice == "2":
                 keys_list(config_path=config_path, all_keys=False)
