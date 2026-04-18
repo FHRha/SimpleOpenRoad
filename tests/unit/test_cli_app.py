@@ -1846,6 +1846,13 @@ def test_cli_manage_existing_key_only_lists_providers_with_configured_keys(tmp_p
         "endpoint": "https://generativelanguage.googleapis.com",
         "keys": [{"id": "gemini-main", "key": "${GEMINI_API_KEY}"}],
     }
+    data["providers"]["ollama"] = {
+        "enabled": False,
+        "priority": 80,
+        "endpoint": "http://127.0.0.1:11434/v1",
+        "auth_required": False,
+        "keys": [{"id": "ollama-local", "key": "local"}],
+    }
     config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     result = runner.invoke(
@@ -1858,6 +1865,7 @@ def test_cli_manage_existing_key_only_lists_providers_with_configured_keys(tmp_p
     assert "github" in result.stdout
     assert "openrouter" in result.stdout
     assert "gemini" not in result.stdout
+    assert "ollama" not in result.stdout
 
 
 def test_cli_keys_view_panel_lists_only_providers_with_configured_keys(tmp_path: Path) -> None:
@@ -1869,6 +1877,13 @@ def test_cli_keys_view_panel_lists_only_providers_with_configured_keys(tmp_path:
         "priority": 10,
         "endpoint": "https://generativelanguage.googleapis.com",
         "keys": [{"id": "gemini-main", "key": "${GEMINI_API_KEY}"}],
+    }
+    data["providers"]["ollama"] = {
+        "enabled": False,
+        "priority": 80,
+        "endpoint": "http://127.0.0.1:11434/v1",
+        "auth_required": False,
+        "keys": [{"id": "ollama-local", "key": "local"}],
     }
     config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
@@ -1883,6 +1898,7 @@ def test_cli_keys_view_panel_lists_only_providers_with_configured_keys(tmp_path:
     assert "github" in result.stdout
     assert "openrouter" in result.stdout
     assert "gemini" not in result.stdout
+    assert "ollama" not in result.stdout
 
 
 def test_api_base_url_prefers_public_domain(monkeypatch, tmp_path: Path) -> None:
@@ -2177,3 +2193,60 @@ def test_interactive_add_provider_key_persists_cloudflare_account_id_before_keys
 
     assert observed["account_id"] == "acc-123"
     assert observed["key_account_id"] == "acc-123"
+
+
+def test_interactive_add_provider_key_configures_local_provider_connection(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["providers"]["ollama"] = {
+        "enabled": False,
+        "priority": 80,
+        "endpoint": "http://127.0.0.1:11434/v1",
+        "auth_required": False,
+        "keys": [{"id": "ollama-local", "key": "local", "priority": 100}],
+    }
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    prompts = iter(["https://llm.example.com/v1", "ollama-remote", "120"])
+    validated: dict[str, str] = {}
+
+    monkeypatch.setattr("app.cli.app._select_provider_from_names", lambda provider_names: "ollama")
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: next(prompts))
+    monkeypatch.setattr(
+        "app.cli.app.typer.confirm",
+        lambda message, default=False: False if "require an upstream API key" in str(message) else True,
+    )
+    monkeypatch.setattr(
+        "app.cli.app.keys_validate",
+        lambda provider, key_id, config_path: validated.update(
+            {"provider": provider, "key_id": key_id, "config_path": config_path}
+        ),
+    )
+
+    _interactive_add_provider_key(str(config_path))
+
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    provider_cfg = updated["providers"]["ollama"]
+    assert provider_cfg["enabled"] is True
+    assert provider_cfg["endpoint"] == "https://llm.example.com/v1"
+    assert provider_cfg["auth_required"] is False
+    assert provider_cfg["keys"] == [
+        {
+            "id": "ollama-remote",
+            "key": "local",
+            "account_id": None,
+            "active": True,
+            "priority": 120,
+            "weight": 1,
+            "tags": [],
+            "limits": {"rpm": None},
+            "cooldown": {"rate_limit_seconds": 30, "error_seconds": 15},
+            "max_retries": 1,
+            "max_consecutive_errors": 5,
+        }
+    ]
+    assert validated == {
+        "provider": "ollama",
+        "key_id": "ollama-remote",
+        "config_path": str(config_path),
+    }

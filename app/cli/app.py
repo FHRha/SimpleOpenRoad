@@ -2128,6 +2128,17 @@ def _interactive_add_provider_key(config_path: str) -> None:
         raise typer.BadParameter("No providers configured. Add providers in config first.")
 
     provider = _select_provider_from_names([str(name) for name in providers.keys()])
+    provider_cfg = providers.get(provider)
+    if not isinstance(provider_cfg, dict):
+        raise typer.BadParameter(f"Provider not found in config: {provider}")
+    if provider_cfg.get("auth_required") is False:
+        _interactive_configure_local_provider(
+            config_path=config_path,
+            data=data,
+            providers=providers,
+            provider=provider,
+        )
+        return
     if provider == "cloudflare":
         existing_account_id = str(providers.get(provider, {}).get("account_id", "") or "").strip()
         account_id = typer.prompt(
@@ -2176,6 +2187,120 @@ def _interactive_add_provider_key(config_path: str) -> None:
         config_path=config_path,
         validate=validate_now,
     )
+
+
+def _prompt_unique_key_id(
+    providers: dict[str, Any],
+    provider: str,
+    default_key_id: str,
+    prompt_label: str = "Key ID",
+) -> str:
+    while True:
+        key_id = typer.prompt(prompt_label, default=default_key_id).strip()
+        if not key_id:
+            raise typer.BadParameter(f"{prompt_label} cannot be empty")
+        existing_key_ids = _configured_key_ids_by_provider(providers)
+        existing_provider = existing_key_ids.get(key_id)
+        if existing_provider is None or existing_provider == provider:
+            return key_id
+        console.print(
+            f"Key ID '{key_id}' already exists in provider '{existing_provider}'. "
+            "Enter another unique local key ID."
+        )
+
+
+def _interactive_configure_local_provider(
+    config_path: str,
+    data: dict[str, Any],
+    providers: dict[str, Any],
+    provider: str,
+) -> None:
+    path = _config_path(config_path)
+    provider_cfg = providers.get(provider)
+    if not isinstance(provider_cfg, dict):
+        raise typer.BadParameter(f"Provider not found in config: {provider}")
+
+    console.print(
+        "Local/self-hosted preset selected. Configure the full upstream Base URL, "
+        "for example http://127.0.0.1:11434/v1 or https://llm.example.com/v1."
+    )
+    endpoint_default = str(provider_cfg.get("endpoint", "") or "").strip()
+    endpoint = typer.prompt("Base URL", default=endpoint_default).strip()
+    if not endpoint:
+        raise typer.BadParameter("Base URL cannot be empty")
+
+    auth_required = typer.confirm(
+        "Does this endpoint require an upstream API key or token",
+        default=False,
+    )
+    existing_keys = [item for item in provider_cfg.get("keys", []) if isinstance(item, dict)]
+    placeholder_key = next((item for item in existing_keys if str(item.get("key", "")).strip().lower() == "local"), None)
+    base_key = placeholder_key or (existing_keys[0] if existing_keys else {"id": f"{provider}-local"})
+    default_key_id = str(base_key.get("id", f"{provider}-local"))
+
+    console.print(
+        "Connection ID is a local name for this upstream endpoint. "
+        "It is used in logs, stats, health checks and removal commands."
+    )
+    key_id = _prompt_unique_key_id(providers, provider, default_key_id, prompt_label="Connection ID")
+
+    if auth_required:
+        secret = typer.prompt("Upstream API key", hide_input=True, confirmation_prompt=True).strip()
+        if not secret:
+            raise typer.BadParameter("Upstream API key cannot be empty")
+    else:
+        secret = "local"
+
+    priority_default = str(base_key.get("priority", 100))
+    priority_raw = typer.prompt("Priority", default=priority_default).strip()
+    if not priority_raw.isdigit():
+        raise typer.BadParameter("Priority must be an integer")
+    priority = int(priority_raw)
+
+    key_data = {
+        "id": key_id,
+        "key": secret,
+        "account_id": None,
+        "active": True,
+        "priority": priority,
+        "weight": int(base_key.get("weight", 1) or 1),
+        "tags": list(base_key.get("tags", [])),
+        "limits": dict(base_key.get("limits", {"rpm": None})),
+        "cooldown": dict(
+            base_key.get(
+                "cooldown",
+                {"rate_limit_seconds": 30, "error_seconds": 15},
+            )
+        ),
+        "max_retries": int(base_key.get("max_retries", 1) or 1),
+        "max_consecutive_errors": int(base_key.get("max_consecutive_errors", 5) or 5),
+    }
+
+    replaced = False
+    new_keys: list[dict[str, Any]] = []
+    for item in existing_keys:
+        if str(item.get("id", "")).strip() == key_id or item is placeholder_key:
+            if not replaced:
+                new_keys.append(key_data)
+                replaced = True
+            continue
+        new_keys.append(item)
+    if not replaced:
+        new_keys.append(key_data)
+
+    provider_cfg["enabled"] = True
+    provider_cfg["endpoint"] = endpoint
+    provider_cfg["auth_required"] = auth_required
+    provider_cfg["keys"] = new_keys
+    _save_yaml(path, data)
+    console.print(
+        f"Configured endpoint for provider {provider}: {endpoint} "
+        f"(upstream auth: {'enabled' if auth_required else 'disabled'})"
+    )
+
+    validate_now = typer.confirm("Validate endpoint now", default=True)
+    if validate_now:
+        keys_validate(provider=provider, key_id=key_id, config_path=config_path)
 
 
 def _configured_key_ids_by_provider(providers: dict[str, Any]) -> dict[str, str]:
@@ -2254,6 +2379,7 @@ def providers_list(
 ) -> None:
     show_all = all_providers if isinstance(all_providers, bool) else False
     container = _container(config_path)
+    cfg = container.runtime_config.get()
     rows = sorted(
         container.admin_service.list_providers(),
         key=lambda row: (
@@ -2262,6 +2388,10 @@ def providers_list(
             str(row["name"]),
         ),
     )
+    for row in rows:
+        provider_name = str(row["name"])
+        provider_cfg = cfg.providers.get(provider_name)
+        row["keys_count"] = _count_user_configured_keys(provider_cfg) if provider_cfg is not None else 0
     if not show_all:
         rows = [row for row in rows if int(row.get("keys_count", 0) or 0) > 0]
     table = Table(title="Providers" if show_all else "Providers With Configured Keys")
@@ -3321,12 +3451,23 @@ def _select_provider_name(config_path: str) -> str:
     return _select_provider_from_names(list(cfg.providers), prompt="Provider number")
 
 
+def _count_user_configured_keys(provider_cfg: Any) -> int:
+    configured_keys = [key for key in provider_cfg.keys if is_configured_secret(key.key)]
+    if provider_cfg.auth_required:
+        return len(configured_keys)
+    return sum(1 for key in configured_keys if str(key.key).strip().lower() != "local")
+
+
+def _has_user_configured_keys(provider_cfg: Any) -> bool:
+    return _count_user_configured_keys(provider_cfg) > 0
+
+
 def _select_provider_name_with_configured_keys(config_path: str) -> str | None:
     cfg = load_gateway_config(config_path=config_path)
     provider_names = [
         provider_name
         for provider_name, provider_cfg in cfg.providers.items()
-        if any(is_configured_secret(key.key) for key in provider_cfg.keys)
+        if _has_user_configured_keys(provider_cfg)
     ]
     if not provider_names:
         console.print("No providers with configured keys are available")
