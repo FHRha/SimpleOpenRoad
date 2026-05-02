@@ -21,6 +21,7 @@ FEATURED_PROVIDER_ORDER = (
     "bedrock",
     "vertex_ai",
     "gemini",
+    "google_code_assist",
     "github",
     "openrouter",
     "groq",
@@ -159,6 +160,13 @@ PROVIDER_METADATA: dict[str, ProviderMetadata] = {
         aliases=("google", "ai studio"),
         groups=("featured", "free-tier", "paid"),
         api_key_url="https://aistudio.google.com/app/apikey",
+    ),
+    "google_code_assist": ProviderMetadata(
+        id="google_code_assist",
+        display_name="Google AI Pro / Code Assist OAuth",
+        aliases=("google ai pro", "code assist", "gemini cli", "google oauth"),
+        groups=("featured", "experimental", "subscription"),
+        api_key_url="https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html",
     ),
     "github": ProviderMetadata(
         id="github",

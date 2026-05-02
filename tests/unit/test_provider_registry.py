@@ -19,6 +19,7 @@ from app.providers.featherless import FeatherlessAdapter
 from app.providers.fireworks import FireworksAdapter
 from app.providers.friendli import FriendliAdapter
 from app.providers.gemini import GeminiAdapter
+from app.providers.google_code_assist import GoogleCodeAssistAdapter
 from app.providers.groq import GroqAdapter
 from app.providers.github_models import GitHubModelsAdapter
 from app.providers.huggingface import HuggingFaceAdapter
@@ -70,6 +71,11 @@ def test_provider_registry_builds_all_supported_adapters() -> None:
                     "endpoint": "https://aiplatform.googleapis.com/v1/projects/p/locations/global/endpoints/openapi",
                 },
                 "gemini": {"enabled": True, "priority": 10, "endpoint": "https://gemini.invalid"},
+                "google_code_assist": {
+                    "enabled": True,
+                    "priority": 15,
+                    "endpoint": "https://cloudcode-pa.googleapis.com",
+                },
                 "github": {"enabled": True, "priority": 20, "endpoint": "https://models.github.ai"},
                 "mistral": {"enabled": True, "priority": 23, "endpoint": "https://api.mistral.ai/v1"},
                 "groq": {"enabled": True, "priority": 25, "endpoint": "https://api.groq.com/openai/v1"},
@@ -229,6 +235,7 @@ def test_provider_registry_builds_all_supported_adapters() -> None:
     assert isinstance(adapters["bedrock"], BedrockAdapter)
     assert isinstance(adapters["vertex_ai"], VertexAIAdapter)
     assert isinstance(adapters["gemini"], GeminiAdapter)
+    assert isinstance(adapters["google_code_assist"], GoogleCodeAssistAdapter)
     assert isinstance(adapters["github"], GitHubModelsAdapter)
     assert isinstance(adapters["mistral"], MistralAdapter)
     assert isinstance(adapters["groq"], GroqAdapter)

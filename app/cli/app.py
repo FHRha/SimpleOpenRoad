@@ -2553,6 +2553,98 @@ def providers_inventory(
     console.print(aliases_table)
 
 
+@providers_app.command("connect")
+def providers_connect(
+    provider: str = typer.Argument(..., help="Provider to connect. Currently supported: google"),
+    profile: str = typer.Option("main", help="Local credential profile name"),
+    key_id: str = typer.Option("google-ai-pro-main", help="Key id to write into config"),
+    callback_host: str = typer.Option("127.0.0.1", help="Local callback bind host on this machine/VPS"),
+    callback_port: int = typer.Option(8765, help="Local callback port"),
+    open_browser: bool = typer.Option(False, help="Try to open browser on this machine"),
+    manual_code: bool = typer.Option(False, help="Use browser URL + pasted authorization code instead of callback"),
+    google_cloud_project: str | None = typer.Option(None, help="Optional Google Cloud project id"),
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+    validate: bool = typer.Option(True, help="Validate provider after connecting"),
+) -> None:
+    if provider.strip().lower() not in {"google", "google_code_assist", "code_assist"}:
+        raise typer.BadParameter("Only google is supported by providers connect right now")
+
+    from app.credentials.google_code_assist import run_local_oauth_flow, run_manual_oauth_flow
+
+    cfg = load_gateway_config(config_path=config_path)
+    credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
+    if manual_code:
+        path, credentials, _auth_url = run_manual_oauth_flow(
+            profile=profile,
+            project_id=google_cloud_project,
+            base_dir=credentials_base,
+        )
+    else:
+        path, credentials, _auth_url = run_local_oauth_flow(
+            profile=profile,
+            callback_host=callback_host,
+            callback_port=callback_port,
+            open_browser=open_browser,
+            project_id=google_cloud_project,
+            base_dir=credentials_base,
+        )
+
+    config_file = _config_path(config_path)
+    data = _load_yaml(config_file)
+    providers = data.setdefault("providers", {})
+    provider_cfg = providers.setdefault(
+        "google_code_assist",
+        {
+            "enabled": True,
+            "priority": 15,
+            "endpoint": "https://cloudcode-pa.googleapis.com",
+            "timeout_seconds": 120,
+            "keys": [],
+        },
+    )
+    provider_cfg["enabled"] = True
+    provider_cfg.setdefault("priority", 15)
+    provider_cfg.setdefault("endpoint", "https://cloudcode-pa.googleapis.com")
+    provider_cfg.setdefault("timeout_seconds", 120)
+    keys = provider_cfg.setdefault("keys", [])
+    key_value = f"oauth-file:{path.resolve()}"
+    key_data = {
+        "id": key_id,
+        "key": key_value,
+        "account_id": credentials.get("account_email"),
+        "active": True,
+        "priority": 100,
+        "weight": 1,
+        "tags": ["oauth", "experimental"],
+        "limits": {"rpm": None},
+        "cooldown": {"rate_limit_seconds": 30, "error_seconds": 15},
+        "max_retries": 1,
+        "max_consecutive_errors": 5,
+    }
+    replaced = False
+    for index, item in enumerate(keys):
+        if isinstance(item, dict) and str(item.get("id")) == key_id:
+            keys[index] = key_data
+            replaced = True
+            break
+    if not replaced:
+        existing_key_ids = _configured_key_ids_by_provider(providers)
+        existing_provider = existing_key_ids.get(key_id)
+        if existing_provider is not None and existing_provider != "google_code_assist":
+            raise typer.BadParameter(
+                f"Key id must be globally unique. '{key_id}' already exists in provider '{existing_provider}'."
+            )
+        keys.append(key_data)
+
+    _save_yaml(config_file, data)
+    console.print(f"Connected Google Code Assist account: {credentials.get('account_email') or '<unknown>'}")
+    console.print(f"Credentials saved: {path}")
+    console.print(f"Provider key configured: google_code_assist/{key_id}")
+
+    if validate:
+        keys_validate(provider="google_code_assist", key_id=key_id, config_path=str(config_file))
+
+
 @providers_app.command("test")
 def providers_test(config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml")) -> None:
     import asyncio
@@ -4712,10 +4804,11 @@ def _run_keys_panel(config_path: str) -> None:
             config_path=config_path,
             lines=[
                 "1) Add provider key (wizard)",
-                "2) View providers and keys",
-                "3) Validate keys",
-                "4) Manage existing key",
-                "5) Clean unconfigured placeholder keys",
+                "2) Connect Google AI Pro (OAuth)",
+                "3) View providers and keys",
+                "4) Validate keys",
+                "5) Manage existing key",
+                "6) Clean unconfigured placeholder keys",
                 "0) Back",
             ],
         )
@@ -4725,13 +4818,27 @@ def _run_keys_panel(config_path: str) -> None:
                 _interactive_add_provider_key(config_path=config_path)
                 _pause()
             elif choice == "2":
-                _run_keys_view_panel(config_path=config_path)
+                providers_connect(
+                    provider="google",
+                    profile="main",
+                    key_id="google-ai-pro-main",
+                    callback_host="127.0.0.1",
+                    callback_port=8765,
+                    open_browser=False,
+                    manual_code=True,
+                    google_cloud_project=None,
+                    config_path=config_path,
+                    validate=True,
+                )
+                _pause()
             elif choice == "3":
+                _run_keys_view_panel(config_path=config_path)
+            elif choice == "4":
                 keys_validate(provider=None, key_id=None, config_path=config_path)
                 _pause()
-            elif choice == "4":
-                _run_manage_existing_key_panel(config_path=config_path)
             elif choice == "5":
+                _run_manage_existing_key_panel(config_path=config_path)
+            elif choice == "6":
                 removed = _remove_unconfigured_provider_keys(config_path=config_path)
                 console.print(f"Removed unconfigured placeholder keys: {removed}")
                 _pause()

@@ -179,6 +179,8 @@ def test_built_wheel_contains_runtime_files(tmp_path: Path) -> None:
         "app/registry/keys.py",
         "app/router/engine.py",
         "app/providers/gemini.py",
+        "app/providers/google_code_assist.py",
+        "app/credentials/google_code_assist.py",
         "app/providers/openai_compatible.py",
     ]:
         assert required in names

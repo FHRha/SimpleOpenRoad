@@ -144,6 +144,7 @@ If you send an exact model id without `provider/`, SimpleOpenRoad tries that mod
 | [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html) | OpenAI-compatible Bedrock runtime endpoint using Amazon Bedrock API keys. |
 | [Google Vertex AI](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | OpenAI-compatible Vertex endpoint using Google Cloud auth, access tokens, or service account credentials. |
 | [Gemini](https://aistudio.google.com/apikey) | Native adapter for Google Gemini models. Create or view keys in Google AI Studio. |
+| [Google AI Pro / Code Assist OAuth](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html) | Experimental Gemini CLI-style OAuth provider for Google AI Pro / Ultra subscriptions. Requires OAuth client env vars, then connect with `sor providers connect google --manual-code`. |
 | [GitHub Models](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) | OpenAI-compatible chat and catalog adapter. Uses GitHub personal access tokens. |
 | [Mistral AI](https://console.mistral.ai/api-keys) | OpenAI-compatible chat, streaming, and model inventory. |
 | [Groq](https://console.groq.com/keys) | OpenAI-compatible chat and streaming. Create keys in GroqCloud. |

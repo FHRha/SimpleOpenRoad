@@ -20,6 +20,7 @@ from app.providers.featherless import FeatherlessAdapter
 from app.providers.fireworks import FireworksAdapter
 from app.providers.friendli import FriendliAdapter
 from app.providers.gemini import GeminiAdapter
+from app.providers.google_code_assist import GoogleCodeAssistAdapter
 from app.providers.github_models import GitHubModelsAdapter
 from app.providers.groq import GroqAdapter
 from app.providers.huggingface import HuggingFaceAdapter
@@ -67,6 +68,8 @@ def build_provider_registry(config: GatewayConfig) -> dict[str, ProviderAdapter]
             adapters[name] = VertexAIAdapter(provider_cfg)
         elif name == "gemini":
             adapters[name] = GeminiAdapter(provider_cfg)
+        elif name == "google_code_assist":
+            adapters[name] = GoogleCodeAssistAdapter(provider_cfg)
         elif name == "github":
             adapters[name] = GitHubModelsAdapter(provider_cfg)
         elif name == "mistral":
