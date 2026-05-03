@@ -14,6 +14,7 @@ import shutil
 import string
 import sys
 import textwrap
+import time
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,7 @@ console = Console()
 
 SERVICE_NAME = "sor"
 MIN_GEMINI_CLI_NODE_MAJOR = 20
+GEMINI_CLI_AUTH_TIMEOUT_SECONDS = 600
 _ROUTE_STRATEGY_OPTIONS = [
     "strict_priority",
     "least_errors",
@@ -2830,9 +2832,33 @@ def _run_gemini_cli_auth_if_needed(
         auth_home.mkdir(parents=True, exist_ok=True)
         env["HOME"] = str(auth_home)
         env["USERPROFILE"] = str(auth_home)
-    proc = subprocess.run(_gemini_cli_auth_command(), env=env)
-    if proc.returncode != 0:
-        raise typer.BadParameter("Gemini CLI sign-in did not complete successfully")
+    proc = subprocess.Popen(_gemini_cli_auth_command(), env=env)
+    deadline = time.monotonic() + GEMINI_CLI_AUTH_TIMEOUT_SECONDS
+    while True:
+        if _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
+            time.sleep(1.0)
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            break
+
+        returncode = proc.poll()
+        if returncode is not None:
+            if returncode != 0:
+                raise typer.BadParameter("Gemini CLI sign-in did not complete successfully")
+            break
+
+        if time.monotonic() >= deadline:
+            if proc.poll() is None:
+                proc.terminate()
+            raise typer.BadParameter("Timed out waiting for Gemini CLI sign-in to create credentials")
+
+        time.sleep(1.0)
+
     if not _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
         raise typer.BadParameter(
             "Gemini CLI finished, but credentials were still not found. "

@@ -202,7 +202,7 @@ def test_gemini_cli_auth_wizard_skips_when_credentials_exist(monkeypatch) -> Non
     calls = {"run": 0}
 
     monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: True)
-    monkeypatch.setattr("app.cli.app.subprocess.run", lambda *args, **kwargs: calls.update(run=1))
+    monkeypatch.setattr("app.cli.app.subprocess.Popen", lambda *args, **kwargs: calls.update(run=1))
 
     _run_gemini_cli_auth_if_needed()
 
@@ -210,13 +210,21 @@ def test_gemini_cli_auth_wizard_skips_when_credentials_exist(monkeypatch) -> Non
 
 
 def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> None:
-    exists = iter([False, True])
+    exists = iter([False, True, True])
     observed: dict[str, object] = {}
 
     class _Proc:
-        returncode = 0
+        def poll(self):
+            return None
 
-    def _fake_run(command, env=None):
+        def terminate(self):
+            observed["terminated"] = True
+
+        def wait(self, timeout=None):
+            observed["wait_timeout"] = timeout
+            return 0
+
+    def _fake_popen(command, env=None):
         observed["command"] = command
         observed["force_file_storage"] = env.get("GEMINI_FORCE_FILE_STORAGE") if env else None
         observed["no_browser"] = env.get("NO_BROWSER") if env else None
@@ -226,7 +234,8 @@ def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> N
     monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
     monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
     monkeypatch.setattr("app.cli.app._find_compatible_node", lambda: Path("/opt/node22/bin/node"))
-    monkeypatch.setattr("app.cli.app.subprocess.run", _fake_run)
+    monkeypatch.setattr("app.cli.app.subprocess.Popen", _fake_popen)
+    monkeypatch.setattr("app.cli.app.time.sleep", lambda seconds: None)
 
     _run_gemini_cli_auth_if_needed()
 
@@ -235,18 +244,27 @@ def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> N
         "force_file_storage": "true",
         "no_browser": "true",
         "path": str(Path("/opt/node22/bin/node").parent),
+        "terminated": True,
+        "wait_timeout": 5,
     }
 
 
 def test_gemini_cli_auth_wizard_uses_isolated_profile_home(monkeypatch, tmp_path: Path) -> None:
-    exists = iter([False, True])
+    exists = iter([False, True, True])
     observed: dict[str, object] = {}
     auth_home = tmp_path / "profiles" / "work"
 
     class _Proc:
-        returncode = 0
+        def poll(self):
+            return None
 
-    def _fake_run(command, env=None):
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _fake_popen(command, env=None):
         observed["home"] = env.get("HOME") if env else None
         observed["userprofile"] = env.get("USERPROFILE") if env else None
         return _Proc()
@@ -254,7 +272,8 @@ def test_gemini_cli_auth_wizard_uses_isolated_profile_home(monkeypatch, tmp_path
     monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
     monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
     monkeypatch.setattr("app.cli.app._find_compatible_node", lambda: Path("/opt/node22/bin/node"))
-    monkeypatch.setattr("app.cli.app.subprocess.run", _fake_run)
+    monkeypatch.setattr("app.cli.app.subprocess.Popen", _fake_popen)
+    monkeypatch.setattr("app.cli.app.time.sleep", lambda seconds: None)
 
     _run_gemini_cli_auth_if_needed(auth_home=auth_home)
 
