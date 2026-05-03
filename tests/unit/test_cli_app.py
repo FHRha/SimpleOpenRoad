@@ -14,8 +14,10 @@ from app.config.loader import load_gateway_config
 from app.cli.app import cli_app
 from app.cli.app import _default_install_root
 from app.cli.app import _ensure_env_master_admin_keys
+from app.cli.app import _find_compatible_node
 from app.cli.app import _interactive_add_provider_key
 from app.cli.app import _model_alias_help_rows
+from app.cli.app import _parse_node_major_version
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
 from app.cli.app import _run_gemini_cli_auth_if_needed
@@ -218,10 +220,12 @@ def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> N
         observed["command"] = command
         observed["force_file_storage"] = env.get("GEMINI_FORCE_FILE_STORAGE") if env else None
         observed["no_browser"] = env.get("NO_BROWSER") if env else None
+        observed["path"] = env.get("PATH", "").split(";")[0] if env else None
         return _Proc()
 
     monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
     monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
+    monkeypatch.setattr("app.cli.app._find_compatible_node", lambda: Path("/opt/node22/bin/node"))
     monkeypatch.setattr("app.cli.app.subprocess.run", _fake_run)
 
     _run_gemini_cli_auth_if_needed()
@@ -230,6 +234,7 @@ def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> N
         "command": ["/usr/bin/gemini"],
         "force_file_storage": "true",
         "no_browser": "true",
+        "path": str(Path("/opt/node22/bin/node").parent),
     }
 
 
@@ -248,12 +253,33 @@ def test_gemini_cli_auth_wizard_uses_isolated_profile_home(monkeypatch, tmp_path
 
     monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
     monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
+    monkeypatch.setattr("app.cli.app._find_compatible_node", lambda: Path("/opt/node22/bin/node"))
     monkeypatch.setattr("app.cli.app.subprocess.run", _fake_run)
 
     _run_gemini_cli_auth_if_needed(auth_home=auth_home)
 
     assert observed == {"home": str(auth_home), "userprofile": str(auth_home)}
     assert auth_home.exists()
+
+
+def test_parse_node_major_version() -> None:
+    assert _parse_node_major_version("v22.12.0") == 22
+    assert _parse_node_major_version("20.19.3") == 20
+    assert _parse_node_major_version("v12.22.9") == 12
+    assert _parse_node_major_version("not-node") is None
+
+
+def test_find_compatible_node_skips_old_node(monkeypatch) -> None:
+    old_node = Path("/usr/bin/node")
+    new_node = Path("/home/user/.nvm/versions/node/v22.12.0/bin/node")
+
+    monkeypatch.setattr("app.cli.app._node_binary_candidates", lambda: [old_node, new_node])
+    monkeypatch.setattr(
+        "app.cli.app._node_version",
+        lambda path: "v12.22.9" if path == old_node else "v22.12.0",
+    )
+
+    assert _find_compatible_node() == new_node
 
 
 def test_cli_without_args_opens_management_panel(monkeypatch) -> None:

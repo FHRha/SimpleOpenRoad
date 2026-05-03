@@ -81,6 +81,7 @@ cli_app.add_typer(service_app, name="service")
 console = Console()
 
 SERVICE_NAME = "sor"
+MIN_GEMINI_CLI_NODE_MAJOR = 20
 _ROUTE_STRATEGY_OPTIONS = [
     "strict_priority",
     "least_errors",
@@ -2697,16 +2698,112 @@ def _gemini_cli_credentials_exist(source_path: str | Path | None = None, auth_ho
 
 
 def _gemini_cli_auth_command() -> list[str]:
+    node = _find_compatible_node()
     gemini_bin = shutil.which("gemini")
     if gemini_bin:
         return [gemini_bin]
+    npx_command = _npx_command_for_node(node)
+    if npx_command:
+        return [*npx_command, "-y", "@google/gemini-cli"]
+    raise typer.BadParameter(
+        "Gemini CLI/npm was not found for a compatible Node.js installation. "
+        "Install Node.js 20+ with npm, then run this wizard again."
+    )
+
+
+def _find_compatible_node() -> Path:
+    candidates = _node_binary_candidates()
+    versions: list[str] = []
+    for candidate in candidates:
+        version_text = _node_version(candidate)
+        if version_text:
+            versions.append(f"{candidate}={version_text}")
+        major = _parse_node_major_version(version_text or "")
+        if major is not None and major >= MIN_GEMINI_CLI_NODE_MAJOR:
+            return candidate
+
+    installed = ", ".join(versions) if versions else "<none found>"
+    raise typer.BadParameter(
+        "Gemini CLI requires Node.js 20 or newer. "
+        f"Found Node.js versions: {installed}. "
+        "Install or activate Node.js 20+ on the VPS, then run this wizard again. "
+        "For Ubuntu, one common path is NodeSource Node.js 22: "
+        "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && "
+        "sudo apt-get install -y nodejs"
+    )
+
+
+def _node_binary_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for name in ("node", "nodejs"):
+        discovered = shutil.which(name)
+        if discovered:
+            candidates.append(Path(discovered))
+
+    home = Path.home()
+    candidates.extend(home.glob(".nvm/versions/node/v*/bin/node"))
+    candidates.extend(Path("/usr/local/bin").glob("node*"))
+    candidates.extend(Path("/opt").glob("node*/bin/node"))
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
+
+
+def _node_version(node_bin: Path) -> str | None:
+    try:
+        proc = subprocess.run([str(node_bin), "--version"], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    return (proc.stdout or proc.stderr).strip() or None
+
+
+def _npx_command_for_node(node_bin: Path) -> list[str] | None:
+    node_dir = node_bin.parent
+    local_npx = node_dir / ("npx.cmd" if os.name == "nt" else "npx")
+    if local_npx.exists():
+        return [str(local_npx)]
+
+    local_npm_cli = node_dir / "node_modules" / "npm" / "bin" / "npx-cli.js"
+    if local_npm_cli.exists():
+        return [str(node_bin), str(local_npm_cli)]
+
+    for npm_bin_name in ("npm", "npm.cmd"):
+        npm_bin = node_dir / npm_bin_name
+        if npm_bin.exists():
+            npm_prefix = _npm_prefix(npm_bin)
+            if npm_prefix:
+                npm_cli = npm_prefix / "lib" / "node_modules" / "npm" / "bin" / "npx-cli.js"
+                if npm_cli.exists():
+                    return [str(node_bin), str(npm_cli)]
+
     npx_bin = shutil.which("npx")
     if npx_bin:
-        return [npx_bin, "-y", "@google/gemini-cli"]
-    raise typer.BadParameter(
-        "Gemini CLI was not found. Install Node.js/npm, then install Gemini CLI with: "
-        "npm install -g @google/gemini-cli"
-    )
+        return [npx_bin]
+    return None
+
+
+def _npm_prefix(npm_bin: Path) -> Path | None:
+    try:
+        proc = subprocess.run([str(npm_bin), "prefix", "-g"], capture_output=True, text=True, check=False)
+    except OSError:
+        return None
+    value = proc.stdout.strip()
+    return Path(value) if proc.returncode == 0 and value else None
+
+
+def _parse_node_major_version(version_text: str) -> int | None:
+    normalized = version_text.strip().lstrip("v")
+    major_text = normalized.split(".", 1)[0]
+    if not major_text.isdigit():
+        return None
+    return int(major_text)
 
 
 def _run_gemini_cli_auth_if_needed(
@@ -2727,6 +2824,8 @@ def _run_gemini_cli_auth_if_needed(
     env = os.environ.copy()
     env["GEMINI_FORCE_FILE_STORAGE"] = "true"
     env["NO_BROWSER"] = "true"
+    compatible_node = _find_compatible_node()
+    env["PATH"] = f"{compatible_node.parent}{os.pathsep}{env.get('PATH', '')}"
     if auth_home is not None:
         auth_home.mkdir(parents=True, exist_ok=True)
         env["HOME"] = str(auth_home)

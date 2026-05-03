@@ -272,6 +272,8 @@ sor providers connect google
 
 If Gemini CLI credentials are missing, SimpleOpenRoad runs the official Gemini CLI with `GEMINI_FORCE_FILE_STORAGE=true` and `NO_BROWSER=true`, waits for you to finish Google sign-in, then continues automatically.
 
+Gemini CLI requires Node.js 20 or newer. The wizard tries to pick a compatible Node.js automatically, including `node`, `nodejs`, common `nvm` installs under `~/.nvm/versions/node/`, `/usr/local/bin`, and `/opt/node*/bin/node`. If it only finds an old version such as `v12.22.9`, upgrade or activate Node.js 20+, then run the wizard again.
+
 SimpleOpenRoad imports the official Gemini CLI credentials from `~/.gemini/gemini-credentials.json` or legacy `~/.gemini/oauth_creds.json`, copies them into `data/credentials/google_code_assist/`, validates the Code Assist backend, and stores only an `oauth-file:` reference in `config/config.yaml`.
 
 `GEMINI_FORCE_FILE_STORAGE=true` makes Gemini CLI store credentials in a local encrypted file that SimpleOpenRoad can import on a server. Without it, some desktop/server environments may store tokens in the OS keychain instead, which SimpleOpenRoad cannot read directly.
