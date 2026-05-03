@@ -2569,6 +2569,7 @@ def providers_connect(
         None,
         help="Path to Gemini CLI oauth_creds.json or gemini-credentials.json. Defaults to the official Gemini CLI location.",
     ),
+    force_gemini_login: bool = typer.Option(False, help="Run Gemini CLI sign-in even if profile credentials already exist"),
     google_cloud_project: str | None = typer.Option(None, help="Optional Google Cloud project id"),
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
     validate: bool = typer.Option(True, help="Validate provider after connecting"),
@@ -2580,11 +2581,18 @@ def providers_connect(
 
     cfg = load_gateway_config(config_path=config_path)
     credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
+    auth_home = _gemini_cli_profile_home(credentials_base, profile) if gemini_cli_credentials_path is None else None
+    if gemini_cli_credentials_path is not None:
+        source_path = gemini_cli_credentials_path
+    elif auth_home is not None:
+        source_path = str(_gemini_cli_profile_source_path(auth_home))
+    else:
+        source_path = None
     console.print("\nImporting credentials from the official Gemini CLI.")
-    console.print("Run `GEMINI_FORCE_FILE_STORAGE=true gemini` and sign in with Google first on this machine/VPS.")
+    _run_gemini_cli_auth_if_needed(source_path, auth_home=auth_home, force=force_gemini_login)
     path, credentials = import_gemini_cli_credentials(
         profile=profile,
-        source_path=gemini_cli_credentials_path,
+        source_path=source_path,
         project_id=google_cloud_project,
         base_dir=credentials_base,
     )
@@ -2660,6 +2668,98 @@ def _configure_google_code_assist_provider(
 
     if validate:
         keys_validate(provider="google_code_assist", key_id=key_id, config_path=str(config_file))
+
+
+def _gemini_cli_profile_home(credentials_base: Path, profile: str) -> Path:
+    safe_profile = "".join(ch for ch in profile if ch.isalnum() or ch in {"-", "_"}).strip() or "main"
+    return credentials_base / "google_code_assist" / "gemini-cli-homes" / safe_profile
+
+
+def _gemini_cli_profile_source_path(auth_home: Path | None) -> Path | None:
+    if auth_home is None:
+        return None
+    from app.credentials.google_code_assist import gemini_cli_credentials_path, gemini_cli_keychain_path
+
+    legacy = gemini_cli_credentials_path(auth_home)
+    if legacy.exists():
+        return legacy
+    return gemini_cli_keychain_path(auth_home)
+
+
+def _gemini_cli_credentials_exist(source_path: str | Path | None = None, auth_home: Path | None = None) -> bool:
+    from app.credentials.google_code_assist import gemini_cli_credentials_path, gemini_cli_keychain_path
+
+    if source_path:
+        return Path(source_path).expanduser().exists()
+    if auth_home is not None:
+        return gemini_cli_credentials_path(auth_home).exists() or gemini_cli_keychain_path(auth_home).exists()
+    return gemini_cli_credentials_path().exists() or gemini_cli_keychain_path().exists()
+
+
+def _gemini_cli_auth_command() -> list[str]:
+    gemini_bin = shutil.which("gemini")
+    if gemini_bin:
+        return [gemini_bin]
+    npx_bin = shutil.which("npx")
+    if npx_bin:
+        return [npx_bin, "-y", "@google/gemini-cli"]
+    raise typer.BadParameter(
+        "Gemini CLI was not found. Install Node.js/npm, then install Gemini CLI with: "
+        "npm install -g @google/gemini-cli"
+    )
+
+
+def _run_gemini_cli_auth_if_needed(
+    source_path: str | Path | None = None,
+    auth_home: Path | None = None,
+    force: bool = False,
+) -> None:
+    if not force and _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
+        console.print("Gemini CLI credentials found. Continuing with import.")
+        return
+    if force:
+        _clear_gemini_cli_auth_credentials(source_path, auth_home=auth_home)
+
+    console.print("Gemini CLI credentials were not found. Starting official Gemini CLI sign-in now.")
+    console.print("Open the URL/code shown by Gemini CLI in your browser and finish Google sign-in.")
+    console.print("SimpleOpenRoad will continue automatically after Gemini CLI exits.\n")
+
+    env = os.environ.copy()
+    env["GEMINI_FORCE_FILE_STORAGE"] = "true"
+    env["NO_BROWSER"] = "true"
+    if auth_home is not None:
+        auth_home.mkdir(parents=True, exist_ok=True)
+        env["HOME"] = str(auth_home)
+        env["USERPROFILE"] = str(auth_home)
+    proc = subprocess.run(_gemini_cli_auth_command(), env=env)
+    if proc.returncode != 0:
+        raise typer.BadParameter("Gemini CLI sign-in did not complete successfully")
+    if not _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
+        raise typer.BadParameter(
+            "Gemini CLI finished, but credentials were still not found. "
+            "Run `GEMINI_FORCE_FILE_STORAGE=true gemini` manually and try again."
+        )
+    console.print("\nGemini CLI credentials created. Continuing with SimpleOpenRoad import.")
+
+
+def _clear_gemini_cli_auth_credentials(source_path: str | Path | None, auth_home: Path | None = None) -> None:
+    from app.credentials.google_code_assist import gemini_cli_credentials_path, gemini_cli_keychain_path
+
+    paths: list[Path] = []
+    if source_path:
+        paths.append(Path(source_path).expanduser())
+    if auth_home is not None:
+        paths.extend([gemini_cli_credentials_path(auth_home), gemini_cli_keychain_path(auth_home)])
+    seen: set[Path] = set()
+    for path in paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            raise typer.BadParameter(f"Could not clear existing Gemini CLI credentials at {path}: {exc}") from exc
 
 
 @providers_app.command("test")
@@ -4814,6 +4914,52 @@ def _run_keys_view_panel(config_path: str) -> None:
             _pause()
 
 
+def _run_gemini_cli_oauth_wizard(config_path: str) -> None:
+    config_file = _config_path(config_path)
+    data = _load_yaml(config_file)
+    providers = data.setdefault("providers", {})
+    google_provider = providers.get("google_code_assist", {})
+    existing_keys = google_provider.get("keys", []) if isinstance(google_provider, dict) else []
+    existing_count = len(existing_keys) if isinstance(existing_keys, list) else 0
+
+    default_profile = "main" if existing_count == 0 else f"account-{existing_count + 1}"
+    console.print("Gemini CLI OAuth supports multiple Google accounts by using separate local profiles.")
+    console.print("Each profile creates a separate provider key under google_code_assist.")
+    console.print("Local profile is only a local SimpleOpenRoad slot name, not your Google email or password.")
+    console.print("Examples: main, personal, work, team-1.")
+    profile = typer.prompt("Local profile", default=default_profile).strip()
+    if not profile:
+        raise typer.BadParameter("Local profile cannot be empty")
+
+    default_key_id = "google-ai-pro-main" if profile == "main" else f"google-ai-pro-{profile}"
+    console.print("Key ID is the local provider key name shown in logs, validation, routing, and key management.")
+    console.print("Use a unique readable value. Examples: google-ai-pro-main, google-ai-pro-work.")
+    key_id = _prompt_unique_key_id(providers, "google_code_assist", default_key_id, prompt_label="Key ID")
+
+    cfg = load_gateway_config(config_path=config_path)
+    credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
+    auth_home = _gemini_cli_profile_home(credentials_base, profile)
+    source_path = _gemini_cli_profile_source_path(auth_home)
+    existing_profile_credentials = _gemini_cli_credentials_exist(source_path, auth_home=auth_home)
+    console.print(f"Credentials for this profile are stored under: {auth_home}")
+    console.print("The Google sign-in opens in the official Gemini CLI flow; SimpleOpenRoad does not ask for your Google password.")
+    force_login = typer.confirm(
+        "Start Google sign-in for this profile now" if not existing_profile_credentials else "Replace existing Google sign-in for this profile",
+        default=not existing_profile_credentials,
+    )
+
+    providers_connect(
+        provider="google",
+        profile=profile,
+        key_id=key_id,
+        gemini_cli_credentials_path=None,
+        force_gemini_login=force_login,
+        google_cloud_project=None,
+        config_path=config_path,
+        validate=True,
+    )
+
+
 def _run_keys_panel(config_path: str) -> None:
     while True:
         _print_menu(
@@ -4835,15 +4981,7 @@ def _run_keys_panel(config_path: str) -> None:
                 _interactive_add_provider_key(config_path=config_path)
                 _pause()
             elif choice == "2":
-                providers_connect(
-                    provider="google",
-                    profile="main",
-                    key_id="google-ai-pro-main",
-                    gemini_cli_credentials_path=None,
-                    google_cloud_project=None,
-                    config_path=config_path,
-                    validate=True,
-                )
+                _run_gemini_cli_oauth_wizard(config_path=config_path)
                 _pause()
             elif choice == "3":
                 _run_keys_view_panel(config_path=config_path)

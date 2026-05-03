@@ -264,16 +264,28 @@ sor keys add --provider gemini --key-id gemini-main --secret <TOKEN>
 
 This provider is experimental. It uses the Gemini CLI / Code Assist OAuth path for Google AI Pro or Ultra accounts. It is separate from the public Gemini API key provider and from Vertex AI.
 
-The recommended path is to sign in with the official Gemini CLI first, then let SimpleOpenRoad import that credential profile. This is the path to use on a headless VPS too: no SSH tunnel is needed because the browser login is handled by the official Gemini CLI flow.
+The recommended path is to let SimpleOpenRoad start the official Gemini CLI sign-in, then import that credential profile. This is the path to use on a headless VPS too: no SSH tunnel is needed because the browser login is handled by the official Gemini CLI flow.
 
 ```bash
-GEMINI_FORCE_FILE_STORAGE=true gemini
 sor providers connect google
 ```
+
+If Gemini CLI credentials are missing, SimpleOpenRoad runs the official Gemini CLI with `GEMINI_FORCE_FILE_STORAGE=true` and `NO_BROWSER=true`, waits for you to finish Google sign-in, then continues automatically.
 
 SimpleOpenRoad imports the official Gemini CLI credentials from `~/.gemini/gemini-credentials.json` or legacy `~/.gemini/oauth_creds.json`, copies them into `data/credentials/google_code_assist/`, validates the Code Assist backend, and stores only an `oauth-file:` reference in `config/config.yaml`.
 
 `GEMINI_FORCE_FILE_STORAGE=true` makes Gemini CLI store credentials in a local encrypted file that SimpleOpenRoad can import on a server. Without it, some desktop/server environments may store tokens in the OS keychain instead, which SimpleOpenRoad cannot read directly.
+
+You can connect multiple Google accounts by using different profiles and key ids:
+
+```bash
+sor providers connect google --profile personal --key-id google-ai-pro-personal
+sor providers connect google --profile work --key-id google-ai-pro-work --force-gemini-login
+```
+
+The interactive `Connect Gemini CLI OAuth` wizard asks for the profile and key id. Each profile gets its own isolated Gemini CLI sign-in directory under `data/credentials/google_code_assist/gemini-cli-homes/`, so signing in to one account does not overwrite another SimpleOpenRoad profile.
+
+`Local profile` is only a local SimpleOpenRoad slot name, for example `main`, `personal`, or `work`. It is not your Google email and not a password. `Key ID` is the local provider key name shown in logs, validation, routing, and key management.
 
 If the token expires and SimpleOpenRoad cannot refresh it, run the official Gemini CLI again, then repeat:
 

@@ -18,6 +18,7 @@ from app.cli.app import _interactive_add_provider_key
 from app.cli.app import _model_alias_help_rows
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
+from app.cli.app import _run_gemini_cli_auth_if_needed
 from app.cli.app import _select_test_alias
 from app.cli.app import _service_mode
 from app.cli.app import _service_unit_path
@@ -193,6 +194,66 @@ def test_cli_config_validate(tmp_path: Path) -> None:
     result = runner.invoke(cli_app, ["config", "validate", "--config-path", str(config_path)])
     assert result.exit_code == 0
     assert "Config OK" in result.stdout
+
+
+def test_gemini_cli_auth_wizard_skips_when_credentials_exist(monkeypatch) -> None:
+    calls = {"run": 0}
+
+    monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: True)
+    monkeypatch.setattr("app.cli.app.subprocess.run", lambda *args, **kwargs: calls.update(run=1))
+
+    _run_gemini_cli_auth_if_needed()
+
+    assert calls == {"run": 0}
+
+
+def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> None:
+    exists = iter([False, True])
+    observed: dict[str, object] = {}
+
+    class _Proc:
+        returncode = 0
+
+    def _fake_run(command, env=None):
+        observed["command"] = command
+        observed["force_file_storage"] = env.get("GEMINI_FORCE_FILE_STORAGE") if env else None
+        observed["no_browser"] = env.get("NO_BROWSER") if env else None
+        return _Proc()
+
+    monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
+    monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
+    monkeypatch.setattr("app.cli.app.subprocess.run", _fake_run)
+
+    _run_gemini_cli_auth_if_needed()
+
+    assert observed == {
+        "command": ["/usr/bin/gemini"],
+        "force_file_storage": "true",
+        "no_browser": "true",
+    }
+
+
+def test_gemini_cli_auth_wizard_uses_isolated_profile_home(monkeypatch, tmp_path: Path) -> None:
+    exists = iter([False, True])
+    observed: dict[str, object] = {}
+    auth_home = tmp_path / "profiles" / "work"
+
+    class _Proc:
+        returncode = 0
+
+    def _fake_run(command, env=None):
+        observed["home"] = env.get("HOME") if env else None
+        observed["userprofile"] = env.get("USERPROFILE") if env else None
+        return _Proc()
+
+    monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
+    monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
+    monkeypatch.setattr("app.cli.app.subprocess.run", _fake_run)
+
+    _run_gemini_cli_auth_if_needed(auth_home=auth_home)
+
+    assert observed == {"home": str(auth_home), "userprofile": str(auth_home)}
+    assert auth_home.exists()
 
 
 def test_cli_without_args_opens_management_panel(monkeypatch) -> None:
