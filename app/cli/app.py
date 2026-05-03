@@ -2565,12 +2565,10 @@ def providers_connect(
     provider: str = typer.Argument(..., help="Provider to connect. Currently supported: google"),
     profile: str = typer.Option("main", help="Local credential profile name"),
     key_id: str = typer.Option("google-ai-pro-main", help="Key id to write into config"),
-    callback_host: str = typer.Option("127.0.0.1", help="Local callback bind host on this machine/VPS"),
-    callback_port: int = typer.Option(8765, help="Local callback port"),
-    open_browser: bool = typer.Option(False, help="Try to open browser on this machine"),
-    manual_code: bool = typer.Option(False, help="Use browser URL + pasted authorization code instead of callback"),
-    oauth_client_id: str | None = typer.Option(None, help="OAuth client id. Prompts when omitted."),
-    oauth_client_secret: str | None = typer.Option(None, help="OAuth client secret. Prompts when omitted."),
+    gemini_cli_credentials_path: str | None = typer.Option(
+        None,
+        help="Path to Gemini CLI oauth_creds.json or gemini-credentials.json. Defaults to the official Gemini CLI location.",
+    ),
     google_cloud_project: str | None = typer.Option(None, help="Optional Google Cloud project id"),
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
     validate: bool = typer.Option(True, help="Validate provider after connecting"),
@@ -2578,49 +2576,36 @@ def providers_connect(
     if provider.strip().lower() not in {"google", "google_code_assist", "code_assist"}:
         raise typer.BadParameter("Only google is supported by providers connect right now")
 
-    from app.credentials.google_code_assist import run_local_oauth_flow, run_manual_oauth_flow
+    from app.credentials.google_code_assist import import_gemini_cli_credentials
 
     cfg = load_gateway_config(config_path=config_path)
     credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
-    if oauth_client_id is None or oauth_client_secret is None:
-        console.print(
-            "\nGemini CLI OAuth needs a Google OAuth Client ID and Client Secret from Google Cloud Console."
-        )
-        console.print("Create/select an OAuth client for this connector, then paste its values here.")
-        console.print("For --manual-code, the authorization page returns a code that you paste back into this terminal.")
-        console.print(
-            "If Google rejects the redirect URI, add this authorized redirect URI to the OAuth client: "
-            "https://codeassist.google.com/authcode"
-        )
-        console.print("For callback mode, also allow: http://127.0.0.1:<callback-port>/oauth2callback\n")
-    client_id = (
-        oauth_client_id
-        or typer.prompt("OAuth Client ID (looks like ...apps.googleusercontent.com)").strip()
-    ).strip()
-    client_secret = (
-        oauth_client_secret
-        or typer.prompt("OAuth Client Secret (starts with GOCSPX- for many Google clients)", hide_input=True).strip()
-    ).strip()
-    if manual_code:
-        path, credentials, _auth_url = run_manual_oauth_flow(
-            profile=profile,
-            client_id=client_id,
-            client_secret=client_secret,
-            project_id=google_cloud_project,
-            base_dir=credentials_base,
-        )
-    else:
-        path, credentials, _auth_url = run_local_oauth_flow(
-            profile=profile,
-            client_id=client_id,
-            client_secret=client_secret,
-            callback_host=callback_host,
-            callback_port=callback_port,
-            open_browser=open_browser,
-            project_id=google_cloud_project,
-            base_dir=credentials_base,
-        )
+    console.print("\nImporting credentials from the official Gemini CLI.")
+    console.print("Run `GEMINI_FORCE_FILE_STORAGE=true gemini` and sign in with Google first on this machine/VPS.")
+    path, credentials = import_gemini_cli_credentials(
+        profile=profile,
+        source_path=gemini_cli_credentials_path,
+        project_id=google_cloud_project,
+        base_dir=credentials_base,
+    )
 
+    _configure_google_code_assist_provider(
+        config_path=config_path,
+        path=path,
+        credentials=credentials,
+        key_id=key_id,
+        validate=validate,
+    )
+
+
+def _configure_google_code_assist_provider(
+    *,
+    config_path: str,
+    path: Path,
+    credentials: dict[str, Any],
+    key_id: str,
+    validate: bool,
+) -> None:
     config_file = _config_path(config_path)
     data = _load_yaml(config_file)
     providers = data.setdefault("providers", {})
@@ -4854,12 +4839,7 @@ def _run_keys_panel(config_path: str) -> None:
                     provider="google",
                     profile="main",
                     key_id="google-ai-pro-main",
-                    callback_host="127.0.0.1",
-                    callback_port=8765,
-                    open_browser=False,
-                    manual_code=True,
-                    oauth_client_id=None,
-                    oauth_client_secret=None,
+                    gemini_cli_credentials_path=None,
                     google_cloud_project=None,
                     config_path=config_path,
                     validate=True,

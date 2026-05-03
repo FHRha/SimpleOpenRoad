@@ -264,47 +264,21 @@ sor keys add --provider gemini --key-id gemini-main --secret <TOKEN>
 
 This provider is experimental. It uses the Gemini CLI / Code Assist OAuth path for Google AI Pro or Ultra accounts. It is separate from the public Gemini API key provider and from Vertex AI.
 
-The wizard asks for OAuth client id and secret, then stores them in the local credential profile alongside the refresh token. They are not written into `config/config.yaml`.
-
-When prompted:
-
-- `OAuth Client ID`: the Google OAuth client id, usually ending with `.apps.googleusercontent.com`.
-- `OAuth Client Secret`: the matching Google OAuth client secret, often starting with `GOCSPX-`.
-- `authorization code`: the code shown by Google after you open the printed URL and approve access.
-
-For manual code mode, the OAuth client must allow:
-
-```text
-https://codeassist.google.com/authcode
-```
-
-For callback mode, also allow:
-
-```text
-http://127.0.0.1:8765/oauth2callback
-```
-
-For a headless VPS, use manual code mode:
+The recommended path is to sign in with the official Gemini CLI first, then let SimpleOpenRoad import that credential profile. This is the path to use on a headless VPS too: no SSH tunnel is needed because the browser login is handled by the official Gemini CLI flow.
 
 ```bash
-sor providers connect google --manual-code
+GEMINI_FORCE_FILE_STORAGE=true gemini
+sor providers connect google
 ```
 
-Open the printed URL in your browser, copy the authorization code, and paste it back into the VPS terminal.
+SimpleOpenRoad imports the official Gemini CLI credentials from `~/.gemini/gemini-credentials.json` or legacy `~/.gemini/oauth_creds.json`, copies them into `data/credentials/google_code_assist/`, validates the Code Assist backend, and stores only an `oauth-file:` reference in `config/config.yaml`.
 
-Copy only the authorization code back into the terminal. If you accidentally press `Ctrl+C`, the wizard reprints the URL and keeps waiting; type `q` to cancel.
+`GEMINI_FORCE_FILE_STORAGE=true` makes Gemini CLI store credentials in a local encrypted file that SimpleOpenRoad can import on a server. Without it, some desktop/server environments may store tokens in the OS keychain instead, which SimpleOpenRoad cannot read directly.
 
-For a local machine with a browser and callback:
-
-```bash
-sor providers connect google --open-browser
-```
-
-For a headless VPS callback flow, forward the callback port from your workstation:
+If the token expires and SimpleOpenRoad cannot refresh it, run the official Gemini CLI again, then repeat:
 
 ```bash
-ssh -L 8765:127.0.0.1:8765 user@YOUR_VPS
-sor providers connect google --callback-port 8765
+sor providers connect google
 ```
 
 The command writes OAuth credentials under `data/credentials/google_code_assist/` and stores only an `oauth-file:` reference in `config/config.yaml`.

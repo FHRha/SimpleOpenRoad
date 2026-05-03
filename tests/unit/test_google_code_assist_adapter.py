@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
 from app.config.models import ProviderConfig
 from app.core.errors import GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
-from app.credentials.google_code_assist import build_auth_url, parse_credential_ref
+from app.credentials.google_code_assist import (
+    gemini_cli_credentials_path,
+    gemini_cli_keychain_path,
+    parse_credential_ref,
+)
 from app.credentials import google_code_assist
 from app.providers.google_code_assist import GoogleCodeAssistAdapter
 
@@ -71,31 +76,91 @@ def test_google_oauth_ref_parsing() -> None:
     assert str(path).endswith("google.json")
 
 
-def test_google_oauth_url_uses_loopback_redirect_and_required_scopes() -> None:
-    flow = build_auth_url("http://127.0.0.1:8765/oauth2callback", client_id="test-client-id", state="s")
-
-    assert "client_id=test-client-id" in flow.auth_url
-    assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Foauth2callback" in flow.auth_url
-    assert "cloud-platform" in flow.auth_url
-    assert flow.state == "s"
+def test_gemini_cli_credentials_path_uses_home_gemini_dir(tmp_path) -> None:
+    assert gemini_cli_credentials_path(tmp_path) == tmp_path / ".gemini" / "oauth_creds.json"
+    assert gemini_cli_keychain_path(tmp_path) == tmp_path / ".gemini" / "gemini-credentials.json"
 
 
-def test_google_manual_oauth_url_uses_codeassist_redirect_and_pkce() -> None:
-    flow = build_auth_url(
-        "https://codeassist.google.com/authcode",
-        client_id="test-client-id",
-        state="s",
-        code_verifier="v" * 64,
+def test_imported_gemini_cli_credentials_normalizes_expiry_date() -> None:
+    credentials = google_code_assist._normalize_imported_credentials(  # noqa: SLF001
+        {"access_token": "token", "expiry_date": 1_800_000_000_000}
     )
 
-    assert "redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauthcode" in flow.auth_url
-    assert "code_challenge_method=S256" in flow.auth_url
-    assert flow.code_verifier == "v" * 64
+    assert credentials["expires_at"] == 1_800_000_000
 
 
-def test_google_authorization_code_validation_rejects_terminal_noise() -> None:
-    assert google_code_assist._looks_like_authorization_code("4/0Aan...valid-looking-code")  # noqa: SLF001
-    assert not google_code_assist._looks_like_authorization_code("")  # noqa: SLF001
-    assert not google_code_assist._looks_like_authorization_code("https://accounts.google.com/o/oauth2/v2/auth")  # noqa: SLF001
-    assert not google_code_assist._looks_like_authorization_code("^Croot@server:~#")  # noqa: SLF001
-    assert not google_code_assist._looks_like_authorization_code("code with spaces")  # noqa: SLF001
+def test_imported_gemini_cli_credentials_normalizes_keychain_token_shape() -> None:
+    credentials = google_code_assist._normalize_imported_credentials(  # noqa: SLF001
+        {
+            "serverName": "main-account",
+            "token": {
+                "accessToken": "token",
+                "refreshToken": "refresh",
+                "tokenType": "Bearer",
+                "expiresAt": 1_800_000_000_000,
+            },
+        }
+    )
+
+    assert credentials["access_token"] == "token"
+    assert credentials["refresh_token"] == "refresh"
+    assert credentials["expires_at"] == 1_800_000_000
+
+
+def test_load_gemini_cli_file_keychain_reads_main_account(tmp_path, monkeypatch) -> None:
+    source = tmp_path / ".gemini" / "gemini-credentials.json"
+    source.parent.mkdir(parents=True)
+    source.write_text("encrypted", encoding="utf-8")
+    decrypted = json.dumps(
+        {
+            "gemini-cli-oauth": {
+                "main-account": json.dumps(
+                    {
+                        "serverName": "main-account",
+                        "token": {
+                            "accessToken": "token",
+                            "refreshToken": "refresh",
+                            "expiresAt": 1_800_000_000_000,
+                        },
+                    }
+                )
+            }
+        }
+    )
+    monkeypatch.setattr(google_code_assist, "_decrypt_gemini_cli_file_keychain", lambda _value: decrypted)
+
+    credentials = google_code_assist._load_gemini_cli_credentials_source(source)  # noqa: SLF001
+
+    assert credentials["token"]["accessToken"] == "token"
+
+
+def test_import_gemini_cli_credentials_copies_profile(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "home" / ".gemini" / "oauth_creds.json"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        json.dumps(
+            {
+                "access_token": "token",
+                "refresh_token": "refresh",
+                "expiry_date": int((time.time() + 3600) * 1000),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(google_code_assist, "fetch_user_email", lambda _token: "user@example.com")
+    monkeypatch.setattr(
+        google_code_assist,
+        "setup_user",
+        lambda credentials, project_id=None: {**credentials, "project_id": project_id or "project-1"},
+    )
+
+    path, credentials = google_code_assist.import_gemini_cli_credentials(
+        source_path=source,
+        base_dir=tmp_path / "data" / "credentials",
+    )
+
+    assert path == tmp_path / "data" / "credentials" / "google_code_assist" / "main.json"
+    assert path.exists()
+    assert credentials["credential_source"] == "gemini_cli"
+    assert credentials["account_email"] == "user@example.com"
+    assert json.loads(path.read_text(encoding="utf-8"))["project_id"] == "project-1"

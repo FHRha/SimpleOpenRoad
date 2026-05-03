@@ -3,38 +3,22 @@
 from __future__ import annotations
 
 import json
-import secrets
-import base64
-import hashlib
+import getpass
+import platform
+import subprocess
 import time
-import webbrowser
-from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
 
-OAUTH_SCOPES = [
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-]
-AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 CODE_ASSIST_VERSION = "v1internal"
-
-
-@dataclass(frozen=True)
-class OAuthStart:
-    auth_url: str
-    state: str
-    redirect_uri: str
-    code_verifier: str | None = None
+GEMINI_CLI_KEYCHAIN_FILE = "gemini-credentials.json"
+GEMINI_CLI_KEYCHAIN_SERVICE = "gemini-cli-oauth"
+GEMINI_CLI_MAIN_ACCOUNT = "main-account"
 
 
 def credential_path(profile: str = "main", base_dir: str | Path = "data/credentials") -> Path:
@@ -42,6 +26,16 @@ def credential_path(profile: str = "main", base_dir: str | Path = "data/credenti
     if not safe_profile:
         safe_profile = "main"
     return Path(base_dir) / "google_code_assist" / f"{safe_profile}.json"
+
+
+def gemini_cli_credentials_path(home: str | Path | None = None) -> Path:
+    base = Path(home).expanduser() if home is not None else Path.home()
+    return base / ".gemini" / "oauth_creds.json"
+
+
+def gemini_cli_keychain_path(home: str | Path | None = None) -> Path:
+    base = Path(home).expanduser() if home is not None else Path.home()
+    return base / ".gemini" / GEMINI_CLI_KEYCHAIN_FILE
 
 
 def parse_credential_ref(value: str) -> tuple[str, Path | None]:
@@ -55,86 +49,18 @@ def parse_credential_ref(value: str) -> tuple[str, Path | None]:
     return raw or "main", None
 
 
-def build_auth_url(
-    redirect_uri: str,
-    client_id: str,
-    state: str | None = None,
-    code_verifier: str | None = None,
-) -> OAuthStart:
-    state_value = state or secrets.token_urlsafe(32)
-    params = {
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": " ".join(OAUTH_SCOPES),
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state_value,
-    }
-    if code_verifier:
-        params["code_challenge_method"] = "S256"
-        params["code_challenge"] = _code_challenge(code_verifier)
-    return OAuthStart(
-        auth_url=f"{AUTH_URL}?{urlencode(params)}",
-        state=state_value,
-        redirect_uri=redirect_uri,
-        code_verifier=code_verifier,
-    )
-
-
-def exchange_code(
-    code: str,
-    redirect_uri: str,
-    client_id: str,
-    client_secret: str,
-    code_verifier: str | None = None,
-) -> dict[str, Any]:
-    data = {
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "grant_type": "authorization_code",
-    }
-    if code_verifier:
-        data["code_verifier"] = code_verifier
-    with httpx.Client(timeout=30) as client:
-        response = client.post(TOKEN_URL, data=data)
-    response.raise_for_status()
-    payload = response.json()
-    return _normalize_token_payload(payload)
-
-
 def refresh_access_token(credentials: dict[str, Any]) -> dict[str, Any]:
     refresh_token = str(credentials.get("refresh_token") or "").strip()
     if not refresh_token:
         raise ValueError("Gemini CLI OAuth credentials do not contain refresh_token")
-    client_id = str(credentials.get("oauth_client_id") or "").strip()
-    client_secret = str(credentials.get("oauth_client_secret") or "").strip()
-    if not client_id or not client_secret:
-        raise ValueError(
-            "Gemini CLI OAuth credentials do not contain oauth_client_id/oauth_client_secret. "
-            "Run: sor providers connect google --manual-code"
-        )
-    with httpx.Client(timeout=30) as client:
-        response = client.post(
-            TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-        )
-    response.raise_for_status()
-    payload = _normalize_token_payload(response.json())
-    payload["refresh_token"] = refresh_token
-    credentials.update(payload)
-    return credentials
+    raise ValueError(
+        "Gemini CLI OAuth token is expired and cannot be refreshed directly by SimpleOpenRoad. "
+        "Run the official Gemini CLI login again, then run: sor providers connect google"
+    )
 
 
 def ensure_access_token(credentials: dict[str, Any], leeway_seconds: int = 60) -> dict[str, Any]:
-    expires_at = int(credentials.get("expires_at") or 0)
+    expires_at = _credential_expires_at(credentials)
     access_token = str(credentials.get("access_token") or "").strip()
     if access_token and expires_at > int(time.time()) + leeway_seconds:
         return credentials
@@ -174,7 +100,17 @@ def code_assist_post(access_token: str, method: str, payload: dict[str, Any]) ->
             },
             json=payload,
         )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        body = response.text[:1200]
+        if response.status_code == 403 and method == "loadCodeAssist":
+            raise ValueError(
+                "Google Code Assist rejected the imported Gemini CLI credentials with 403 on loadCodeAssist. "
+                "Run the official Gemini CLI again with the same Google account, make sure the account has "
+                "Gemini Code Assist / AI Pro access, then run: sor providers connect google. "
+                "Upstream response: "
+                f"{body}"
+            )
+        response.raise_for_status()
     return response.json()
 
 
@@ -230,145 +166,129 @@ def setup_user(credentials: dict[str, Any], project_id: str | None = None) -> di
     return credentials
 
 
-def run_local_oauth_flow(
+def import_gemini_cli_credentials(
     profile: str = "main",
-    client_id: str = "",
-    client_secret: str = "",
-    callback_host: str = "127.0.0.1",
-    callback_port: int = 8765,
-    open_browser: bool = False,
+    source_path: str | Path | None = None,
     project_id: str | None = None,
     base_dir: str | Path = "data/credentials",
-) -> tuple[Path, dict[str, Any], str]:
-    client_id = _require_oauth_value(client_id, "client_id")
-    client_secret = _require_oauth_value(client_secret, "client_secret")
-    redirect_uri = f"http://127.0.0.1:{callback_port}/oauth2callback"
-    oauth = build_auth_url(redirect_uri, client_id=client_id)
-    captured: dict[str, str] = {}
-
-    class CallbackHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
-            query = parse_qs(urlparse(self.path).query)
-            if not self.path.startswith("/oauth2callback"):
-                self.send_response(404)
-                self.end_headers()
-                return
-            captured["state"] = query.get("state", [""])[0]
-            captured["code"] = query.get("code", [""])[0]
-            captured["error"] = query.get("error", [""])[0]
-            self.send_response(200 if captured.get("code") else 400)
-            self.end_headers()
-            self.wfile.write(b"Gemini CLI OAuth authentication received. You can close this tab.")
-
-        def log_message(self, format: str, *args: object) -> None:
-            return
-
-    server = HTTPServer((callback_host, callback_port), CallbackHandler)
-    if open_browser:
-        webbrowser.open(oauth.auth_url)
-    print(f"Open this URL in your browser:\n{oauth.auth_url}\n")
-    print(f"Waiting for callback on {callback_host}:{callback_port} ...")
-    server.handle_request()
-    server.server_close()
-
-    if captured.get("error"):
-        raise ValueError(f"Google OAuth error: {captured['error']}")
-    if captured.get("state") != oauth.state:
-        raise ValueError("OAuth state mismatch")
-    if not captured.get("code"):
-        raise ValueError("OAuth callback did not include an authorization code")
-
-    credentials = exchange_code(captured["code"], oauth.redirect_uri, client_id, client_secret)
-    credentials["oauth_client_id"] = client_id
-    credentials["oauth_client_secret"] = client_secret
+) -> tuple[Path, dict[str, Any]]:
+    source = Path(source_path).expanduser() if source_path else _default_gemini_cli_credentials_source()
+    if not source.exists():
+        raise ValueError(
+            f"Gemini CLI credentials were not found at {source}. "
+            "Run the official Gemini CLI and sign in with Google first. "
+            "On a headless VPS, prefer: GEMINI_FORCE_FILE_STORAGE=true gemini"
+        )
+    credentials = _load_gemini_cli_credentials_source(source)
+    credentials["credential_source"] = "gemini_cli"
+    credentials["source_path"] = str(source)
+    credentials = _normalize_imported_credentials(credentials)
     email = fetch_user_email(str(credentials.get("access_token") or ""))
     if email:
         credentials["account_email"] = email
     credentials = setup_user(credentials, project_id=project_id)
     path = credential_path(profile, base_dir=base_dir)
     save_credentials(path, credentials)
-    return path, credentials, oauth.auth_url
+    return path, credentials
 
 
-def run_manual_oauth_flow(
-    profile: str = "main",
-    client_id: str = "",
-    client_secret: str = "",
-    project_id: str | None = None,
-    base_dir: str | Path = "data/credentials",
-) -> tuple[Path, dict[str, Any], str]:
-    client_id = _require_oauth_value(client_id, "client_id")
-    client_secret = _require_oauth_value(client_secret, "client_secret")
-    redirect_uri = "https://codeassist.google.com/authcode"
-    code_verifier = secrets.token_urlsafe(64)
-    oauth = build_auth_url(redirect_uri, client_id=client_id, code_verifier=code_verifier)
-    print("Open this URL in your browser:")
-    print(oauth.auth_url)
-    print()
-    print("Paste only the authorization code here. Type 'q' to cancel.")
-    code = _prompt_authorization_code(oauth.auth_url)
-
-    credentials = exchange_code(code, oauth.redirect_uri, client_id, client_secret, code_verifier=code_verifier)
-    credentials["oauth_client_id"] = client_id
-    credentials["oauth_client_secret"] = client_secret
-    email = fetch_user_email(str(credentials.get("access_token") or ""))
-    if email:
-        credentials["account_email"] = email
-    credentials = setup_user(credentials, project_id=project_id)
-    path = credential_path(profile, base_dir=base_dir)
-    save_credentials(path, credentials)
-    return path, credentials, oauth.auth_url
-
-
-def _normalize_token_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    result = dict(payload)
-    expires_in = int(result.get("expires_in") or 3600)
-    result["expires_at"] = int(time.time()) + expires_in
+def _normalize_imported_credentials(credentials: dict[str, Any]) -> dict[str, Any]:
+    result = _normalize_gemini_cli_token_shape(credentials)
+    expires_at = _credential_expires_at(result)
+    if expires_at:
+        result["expires_at"] = expires_at
+    if not result.get("access_token"):
+        raise ValueError("Imported Gemini CLI credentials do not contain access_token")
     return result
+
+
+def _default_gemini_cli_credentials_source() -> Path:
+    legacy = gemini_cli_credentials_path()
+    if legacy.exists():
+        return legacy
+    return gemini_cli_keychain_path()
+
+
+def _load_gemini_cli_credentials_source(source: Path) -> dict[str, Any]:
+    if source.name == GEMINI_CLI_KEYCHAIN_FILE:
+        return _load_gemini_cli_file_keychain(source)
+    return load_credentials(source)
+
+
+def _load_gemini_cli_file_keychain(source: Path) -> dict[str, Any]:
+    encrypted = source.read_text(encoding="utf-8").strip()
+    decrypted = _decrypt_gemini_cli_file_keychain(encrypted)
+    data = json.loads(decrypted)
+    service = data.get(GEMINI_CLI_KEYCHAIN_SERVICE)
+    if not isinstance(service, dict):
+        raise ValueError(f"Gemini CLI file storage does not contain {GEMINI_CLI_KEYCHAIN_SERVICE}")
+    account = service.get(GEMINI_CLI_MAIN_ACCOUNT)
+    if not isinstance(account, str) or not account.strip():
+        raise ValueError(f"Gemini CLI file storage does not contain {GEMINI_CLI_MAIN_ACCOUNT}")
+    credentials = json.loads(account)
+    if not isinstance(credentials, dict):
+        raise ValueError("Gemini CLI file storage contains invalid OAuth credentials")
+    return credentials
+
+
+def _decrypt_gemini_cli_file_keychain(encrypted: str) -> str:
+    parts = encrypted.split(":")
+    if len(parts) != 3:
+        raise ValueError("Gemini CLI credentials file is not in the expected encrypted format")
+    script = """
+const crypto = require("node:crypto");
+const os = require("node:os");
+const encrypted = process.argv[1];
+const hostname = process.argv[2];
+const username = process.argv[3];
+const [ivHex, tagHex, dataHex] = encrypted.split(":");
+const salt = `${hostname}-${username}-gemini-cli`;
+const key = crypto.scryptSync("gemini-cli-oauth", salt, 32);
+const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivHex, "hex"));
+decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+let out = decipher.update(dataHex, "hex", "utf8");
+out += decipher.final("utf8");
+process.stdout.write(out);
+""".strip()
+    try:
+        result = subprocess.run(
+            ["node", "-e", script, encrypted, platform.node(), getpass.getuser()],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except FileNotFoundError as exc:
+        raise ValueError("Node.js is required to import Gemini CLI encrypted file credentials") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)).strip()
+        raise ValueError(f"Could not decrypt Gemini CLI credentials file: {detail}") from exc
+    return result.stdout
+
+
+def _normalize_gemini_cli_token_shape(credentials: dict[str, Any]) -> dict[str, Any]:
+    token = credentials.get("token")
+    if isinstance(token, dict):
+        return {
+            **credentials,
+            "access_token": token.get("accessToken"),
+            "refresh_token": token.get("refreshToken"),
+            "token_type": token.get("tokenType"),
+            "scope": token.get("scope"),
+            "expiry_date": token.get("expiresAt"),
+        }
+    return dict(credentials)
+
+
+def _credential_expires_at(credentials: dict[str, Any]) -> int:
+    expires_at = int(credentials.get("expires_at") or 0)
+    if expires_at:
+        return expires_at
+    expiry_date = int(credentials.get("expiry_date") or 0)
+    if expiry_date:
+        return int(expiry_date / 1000) if expiry_date > 10_000_000_000 else expiry_date
+    return 0
 
 
 def _without_none(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None}
-
-
-def _code_challenge(code_verifier: str) -> str:
-    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
-    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-
-def _prompt_authorization_code(auth_url: str) -> str:
-    while True:
-        try:
-            code = input("Paste authorization code: ").strip()
-        except KeyboardInterrupt:
-            print("\nInterrupted while waiting for the code. The wizard is still running.")
-            print("Open this URL in your browser:")
-            print(auth_url)
-            print("Paste the authorization code, or type 'q' to cancel.")
-            continue
-        except EOFError as exc:
-            raise ValueError("Authorization code input was closed") from exc
-
-        if code.lower() in {"q", "quit", "exit", "cancel"}:
-            raise ValueError("Authorization cancelled")
-        if _looks_like_authorization_code(code):
-            return code
-        print("That does not look like an authorization code.")
-        print("Paste only the code from the browser page, not the full URL or terminal text.")
-
-
-def _looks_like_authorization_code(value: str) -> bool:
-    if not value or any(ch.isspace() for ch in value):
-        return False
-    if "http://" in value.lower() or "https://" in value.lower():
-        return False
-    if any(ord(ch) < 32 for ch in value):
-        return False
-    return len(value) >= 20
-
-
-def _require_oauth_value(value: str, name: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(f"Gemini CLI OAuth {name} is required")
-    return normalized
