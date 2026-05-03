@@ -49,6 +49,7 @@ from app.storage.repositories.keys_repo import KeysRuntimeRepository
 from app.storage.repositories.model_runtime_repo import ModelRuntimeRepository
 from app.storage.repositories.route_memory_repo import RouteModelMemoryRepository
 from app.providers.metadata import (
+    EXPERIMENTAL_PROVIDER_SET,
     FEATURED_PROVIDER_ORDER,
     FEATURED_PROVIDER_SET,
     OTHER_PROVIDER_DISPLAY_LIMIT,
@@ -1274,11 +1275,17 @@ def _search_provider_names(provider_names: list[str], query: str) -> list[str]:
 def _print_provider_choices(provider_names: list[str]) -> list[str]:
     ordered = _sorted_provider_names(provider_names)
     featured = [name for name in ordered if name in FEATURED_PROVIDER_SET]
-    other = [name for name in ordered if name not in FEATURED_PROVIDER_SET]
+    experimental = [name for name in ordered if name in EXPERIMENTAL_PROVIDER_SET]
+    other = [
+        name
+        for name in ordered
+        if name not in FEATURED_PROVIDER_SET and name not in EXPERIMENTAL_PROVIDER_SET
+    ]
     hidden_other_count = max(0, len(other) - OTHER_PROVIDER_DISPLAY_LIMIT)
     displayed_other = other[:OTHER_PROVIDER_DISPLAY_LIMIT]
     groups = [
         ("Featured providers", featured),
+        ("Experimental providers", experimental),
         ("Other providers", displayed_other),
     ]
     displayed: list[str] = []
@@ -2562,6 +2569,8 @@ def providers_connect(
     callback_port: int = typer.Option(8765, help="Local callback port"),
     open_browser: bool = typer.Option(False, help="Try to open browser on this machine"),
     manual_code: bool = typer.Option(False, help="Use browser URL + pasted authorization code instead of callback"),
+    oauth_client_id: str | None = typer.Option(None, help="OAuth client id. Prompts when omitted."),
+    oauth_client_secret: str | None = typer.Option(None, help="OAuth client secret. Prompts when omitted."),
     google_cloud_project: str | None = typer.Option(None, help="Optional Google Cloud project id"),
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
     validate: bool = typer.Option(True, help="Validate provider after connecting"),
@@ -2573,15 +2582,24 @@ def providers_connect(
 
     cfg = load_gateway_config(config_path=config_path)
     credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
+    client_id = (oauth_client_id or typer.prompt("Gemini CLI OAuth client ID").strip()).strip()
+    client_secret = (
+        oauth_client_secret
+        or typer.prompt("Gemini CLI OAuth client secret", hide_input=True, confirmation_prompt=True).strip()
+    ).strip()
     if manual_code:
         path, credentials, _auth_url = run_manual_oauth_flow(
             profile=profile,
+            client_id=client_id,
+            client_secret=client_secret,
             project_id=google_cloud_project,
             base_dir=credentials_base,
         )
     else:
         path, credentials, _auth_url = run_local_oauth_flow(
             profile=profile,
+            client_id=client_id,
+            client_secret=client_secret,
             callback_host=callback_host,
             callback_port=callback_port,
             open_browser=open_browser,
@@ -2637,7 +2655,7 @@ def providers_connect(
         keys.append(key_data)
 
     _save_yaml(config_file, data)
-    console.print(f"Connected Google Code Assist account: {credentials.get('account_email') or '<unknown>'}")
+    console.print(f"Connected Gemini CLI OAuth account: {credentials.get('account_email') or '<unknown>'}")
     console.print(f"Credentials saved: {path}")
     console.print(f"Provider key configured: google_code_assist/{key_id}")
 
@@ -4804,7 +4822,7 @@ def _run_keys_panel(config_path: str) -> None:
             config_path=config_path,
             lines=[
                 "1) Add provider key (wizard)",
-                "2) Connect Google AI Pro (OAuth)",
+                "2) Connect Gemini CLI OAuth",
                 "3) View providers and keys",
                 "4) Validate keys",
                 "5) Manage existing key",
@@ -4826,6 +4844,8 @@ def _run_keys_panel(config_path: str) -> None:
                     callback_port=8765,
                     open_browser=False,
                     manual_code=True,
+                    oauth_client_id=None,
+                    oauth_client_secret=None,
                     google_cloud_project=None,
                     config_path=config_path,
                     validate=True,

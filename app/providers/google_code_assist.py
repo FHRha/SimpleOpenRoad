@@ -1,4 +1,4 @@
-"""Experimental Google Code Assist adapter using Gemini CLI-style OAuth."""
+"""Experimental Gemini CLI OAuth adapter using the Code Assist backend."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
         if not path.exists():
             raise GatewayError(
                 message=(
-                    "Google Code Assist OAuth credentials are missing. "
+                    "Gemini CLI OAuth credentials are missing. "
                     "Run: sor providers connect google"
                 ),
                 error_class=ErrorClass.AUTH_INVALID,
@@ -67,7 +67,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
             raise self._gateway_error_from_response(exc.response, key, "Google OAuth refresh failed") from exc
         except Exception as exc:  # noqa: BLE001
             raise GatewayError(
-                message=f"Google Code Assist credentials could not be loaded: {exc}",
+                message=f"Gemini CLI OAuth credentials could not be loaded: {exc}",
                 error_class=ErrorClass.AUTH_INVALID,
                 status_code=401,
                 provider=self.provider_name,
@@ -163,7 +163,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
         if not text:
             reason_suffix = f" finishReason={finish_reason}" if finish_reason else ""
             raise GatewayError(
-                message=f"Google Code Assist returned no assistant text.{reason_suffix}",
+                message=f"Gemini CLI OAuth returned no assistant text.{reason_suffix}",
                 error_class=ErrorClass.MALFORMED_RESPONSE,
                 status_code=502,
                 provider=self.provider_name,
@@ -203,7 +203,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
                 )
         except httpx.TimeoutException as exc:
             raise GatewayError(
-                message="Timeout contacting Google Code Assist",
+                message="Timeout contacting Gemini CLI OAuth backend",
                 error_class=ErrorClass.NETWORK_TIMEOUT,
                 status_code=504,
                 provider=self.provider_name,
@@ -211,14 +211,14 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
             ) from exc
         except httpx.HTTPError as exc:
             raise GatewayError(
-                message=f"Network error contacting Google Code Assist: {exc}",
+                message=f"Network error contacting Gemini CLI OAuth backend: {exc}",
                 error_class=ErrorClass.PROVIDER_UNAVAILABLE,
                 status_code=503,
                 provider=self.provider_name,
                 key_id=key.id,
             ) from exc
         if response.status_code >= 400:
-            raise self._gateway_error_from_response(response, key, "Google Code Assist returned an error")
+            raise self._gateway_error_from_response(response, key, "Gemini CLI OAuth backend returned an error")
         return response.json()
 
     def _gateway_error_from_response(self, response: httpx.Response, key: KeyConfig, prefix: str) -> GatewayError:
@@ -289,7 +289,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
                             raise self._gateway_error_from_response(
                                 response,
                                 key,
-                                f"Google Code Assist stream error: {body}",
+                                f"Gemini CLI OAuth stream error: {body}",
                             )
 
                         chunk_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -347,7 +347,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
 
                         if not emitted_text:
                             raise GatewayError(
-                                message="Google Code Assist stream returned no assistant text.",
+                                message="Gemini CLI OAuth stream returned no assistant text.",
                                 error_class=ErrorClass.MALFORMED_RESPONSE,
                                 status_code=502,
                                 provider=self.provider_name,
@@ -365,7 +365,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
                         yield b"data: [DONE]\n\n"
             except httpx.TimeoutException as exc:
                 raise GatewayError(
-                    message="Timeout contacting Google Code Assist",
+                    message="Timeout contacting Gemini CLI OAuth backend",
                     error_class=ErrorClass.NETWORK_TIMEOUT,
                     status_code=504,
                     provider=self.provider_name,
@@ -373,7 +373,7 @@ class GoogleCodeAssistAdapter(ProviderAdapter):
                 ) from exc
             except httpx.HTTPError as exc:
                 raise GatewayError(
-                    message=f"Network error contacting Google Code Assist: {exc}",
+                    message=f"Network error contacting Gemini CLI OAuth backend: {exc}",
                     error_class=ErrorClass.PROVIDER_UNAVAILABLE,
                     status_code=503,
                     provider=self.provider_name,

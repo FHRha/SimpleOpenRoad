@@ -21,7 +21,6 @@ FEATURED_PROVIDER_ORDER = (
     "bedrock",
     "vertex_ai",
     "gemini",
-    "google_code_assist",
     "github",
     "openrouter",
     "groq",
@@ -163,9 +162,9 @@ PROVIDER_METADATA: dict[str, ProviderMetadata] = {
     ),
     "google_code_assist": ProviderMetadata(
         id="google_code_assist",
-        display_name="Google AI Pro / Code Assist OAuth",
+        display_name="Gemini CLI OAuth",
         aliases=("google ai pro", "code assist", "gemini cli", "google oauth"),
-        groups=("featured", "experimental", "subscription"),
+        groups=("experimental", "subscription"),
         api_key_url="https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html",
     ),
     "github": ProviderMetadata(
@@ -388,8 +387,14 @@ PROVIDER_METADATA: dict[str, ProviderMetadata] = {
     ),
 }
 
+EXPERIMENTAL_PROVIDER_SET = {
+    name for name, metadata in PROVIDER_METADATA.items() if "experimental" in metadata.groups
+}
+
 
 def provider_category(provider_name: str) -> str:
+    if provider_name in EXPERIMENTAL_PROVIDER_SET:
+        return "Experimental"
     return "Featured" if provider_name in FEATURED_PROVIDER_SET else "Other"
 
 
@@ -408,7 +413,7 @@ def sorted_provider_names(provider_names: list[str]) -> list[str]:
     return sorted(
         provider_names,
         key=lambda name: (
-            0 if name in FEATURED_PROVIDER_SET else 1,
+            0 if name in FEATURED_PROVIDER_SET else 1 if name in EXPERIMENTAL_PROVIDER_SET else 2,
             featured_index.get(name, 999),
             name,
         ),

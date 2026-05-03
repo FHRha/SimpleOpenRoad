@@ -10,6 +10,7 @@ def test_sorted_provider_names_puts_featured_first() -> None:
             "cloudflare",
             "groq",
             "gemini",
+            "google_code_assist",
             "openrouter",
             "together",
             "cerebras",
@@ -33,6 +34,7 @@ def test_sorted_provider_names_puts_featured_first() -> None:
         "deepseek",
         "ollama",
     ]
+    assert ordered[9] == "google_code_assist"
     assert ordered[-4:] == ["cerebras", "customlab", "together", "zzz-provider"]
 
 
@@ -41,6 +43,7 @@ def test_provider_category_marks_featured_and_other() -> None:
     assert _provider_category("anthropic") == "Featured"
     assert _provider_category("azure_openai") == "Featured"
     assert _provider_category("gemini") == "Featured"
+    assert _provider_category("google_code_assist") == "Experimental"
     assert _provider_category("cloudflare") == "Featured"
     assert _provider_category("mistral") == "Featured"
     assert _provider_category("deepseek") == "Featured"
@@ -51,15 +54,17 @@ def test_provider_category_marks_featured_and_other() -> None:
 
 
 def test_print_provider_choices_shows_explicit_group_separators(capsys) -> None:
-    ordered = _print_provider_choices(["customlab", "gemini"])
+    ordered = _print_provider_choices(["customlab", "gemini", "google_code_assist"])
 
     captured = capsys.readouterr().out
 
-    assert ordered == ["gemini", "customlab"]
+    assert ordered == ["gemini", "google_code_assist", "customlab"]
     assert "--- Featured providers ---" in captured
+    assert "--- Experimental providers ---" in captured
     assert "--- Other providers ---" in captured
     assert "1) gemini - Google Gemini" in captured
-    assert "2) customlab - customlab" in captured
+    assert "2) google_code_assist - Gemini CLI OAuth" in captured
+    assert "3) customlab - customlab" in captured
     assert "S) Search provider" in captured
     assert "M) Manual provider id" in captured
 

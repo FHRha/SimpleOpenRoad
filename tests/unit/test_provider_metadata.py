@@ -14,6 +14,7 @@ def test_provider_metadata_contains_display_names_and_key_links() -> None:
     assert provider_display_name("azure_openai") == "Azure OpenAI"
     assert provider_display_name("bedrock") == "Amazon Bedrock"
     assert provider_display_name("vertex_ai") == "Google Vertex AI"
+    assert provider_display_name("google_code_assist") == "Gemini CLI OAuth"
     assert provider_display_name("perplexity") == "Perplexity"
     assert provider_display_name("novita") == "Novita AI"
     assert provider_display_name("baseten") == "Baseten"
@@ -37,6 +38,7 @@ def test_provider_metadata_contains_display_names_and_key_links() -> None:
 def test_provider_metadata_categories_follow_featured_set() -> None:
     assert provider_category("openai") == "Featured"
     assert provider_category("ollama") == "Featured"
+    assert provider_category("google_code_assist") == "Experimental"
     assert provider_category("together") == "Other"
 
 
@@ -50,6 +52,7 @@ def test_provider_metadata_sorting_and_search() -> None:
         "bedrock",
         "vertex_ai",
         "gemini",
+        "google_code_assist",
         "moonshot",
         "perplexity",
         "novita",
@@ -69,10 +72,12 @@ def test_provider_metadata_sorting_and_search() -> None:
     ]
 
     assert sorted_provider_names(providers)[:5] == ["anthropic", "azure_openai", "bedrock", "vertex_ai", "gemini"]
+    assert "google_code_assist" in sorted_provider_names(providers)
     assert search_provider_names(providers, "claude")[0] == "anthropic"
     assert search_provider_names(providers, "azure")[0] == "azure_openai"
     assert search_provider_names(providers, "amazon bedrock")[0] == "bedrock"
     assert search_provider_names(providers, "vertex ai")[0] == "vertex_ai"
+    assert search_provider_names(providers, "gemini cli")[0] == "google_code_assist"
     assert search_provider_names(providers, "kimi")[0] == "moonshot"
     assert search_provider_names(providers, "sonar")[0] == "perplexity"
     assert search_provider_names(providers, "base ten")[0] == "baseten"

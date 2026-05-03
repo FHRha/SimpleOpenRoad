@@ -20,7 +20,7 @@ sor routes preview --model auto/general
 | [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html) | yes | yes | model-dependent | yes | Amazon Bedrock API keys. |
 | [Google Vertex AI](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | yes | yes | model-dependent | yes | Google Cloud auth via access token, service account JSON, or ADC. |
 | [Gemini](https://aistudio.google.com/apikey) | yes | yes | model-dependent | yes | Google AI Studio API keys. |
-| [Google AI Pro / Code Assist OAuth](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html) | yes | yes | experimental | yes | Gemini CLI-style OAuth for Google AI Pro / Ultra accounts. |
+| [Gemini CLI OAuth](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html) | yes | yes | experimental | yes | Gemini CLI-style OAuth for Google AI Pro / Ultra accounts. |
 | [GitHub Models](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) | yes | yes | model-dependent | yes | GitHub personal access token. |
 | [Mistral AI](https://console.mistral.ai/api-keys) | yes | yes | model-dependent | yes | Mistral console API keys. |
 | [Groq](https://console.groq.com/keys) | yes | yes | model-dependent | yes | GroqCloud API keys. |
@@ -260,16 +260,11 @@ providers:
 sor keys add --provider gemini --key-id gemini-main --secret <TOKEN>
 ```
 
-## Google AI Pro / Code Assist OAuth
+## Gemini CLI OAuth
 
 This provider is experimental. It uses the Gemini CLI / Code Assist OAuth path for Google AI Pro or Ultra accounts. It is separate from the public Gemini API key provider and from Vertex AI.
 
-Before connecting, set OAuth client values for the Google Code Assist-compatible installed-app flow:
-
-```bash
-export GOOGLE_CODE_ASSIST_OAUTH_CLIENT_ID="..."
-export GOOGLE_CODE_ASSIST_OAUTH_CLIENT_SECRET="..."
-```
+The wizard asks for OAuth client id and secret, then stores them in the local credential profile alongside the refresh token. They are not written into `config/config.yaml`.
 
 For a headless VPS, use manual code mode:
 

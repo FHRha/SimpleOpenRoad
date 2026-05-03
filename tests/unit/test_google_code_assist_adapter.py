@@ -70,9 +70,8 @@ def test_google_oauth_ref_parsing() -> None:
     assert str(path).endswith("google.json")
 
 
-def test_google_oauth_url_uses_loopback_redirect_and_required_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GOOGLE_CODE_ASSIST_OAUTH_CLIENT_ID", "test-client-id")
-    flow = build_auth_url("http://127.0.0.1:8765/oauth2callback", state="s")
+def test_google_oauth_url_uses_loopback_redirect_and_required_scopes() -> None:
+    flow = build_auth_url("http://127.0.0.1:8765/oauth2callback", client_id="test-client-id", state="s")
 
     assert "client_id=test-client-id" in flow.auth_url
     assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A8765%2Foauth2callback" in flow.auth_url
@@ -80,9 +79,13 @@ def test_google_oauth_url_uses_loopback_redirect_and_required_scopes(monkeypatch
     assert flow.state == "s"
 
 
-def test_google_manual_oauth_url_uses_codeassist_redirect_and_pkce(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GOOGLE_CODE_ASSIST_OAUTH_CLIENT_ID", "test-client-id")
-    flow = build_auth_url("https://codeassist.google.com/authcode", state="s", code_verifier="v" * 64)
+def test_google_manual_oauth_url_uses_codeassist_redirect_and_pkce() -> None:
+    flow = build_auth_url(
+        "https://codeassist.google.com/authcode",
+        client_id="test-client-id",
+        state="s",
+        code_verifier="v" * 64,
+    )
 
     assert "redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauthcode" in flow.auth_url
     assert "code_challenge_method=S256" in flow.auth_url

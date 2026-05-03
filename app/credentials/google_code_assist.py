@@ -1,4 +1,4 @@
-"""Google Code Assist OAuth helpers used by the experimental provider."""
+"""Gemini CLI OAuth helpers used by the experimental provider."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import secrets
 import base64
 import hashlib
 import time
-import os
 import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -58,11 +57,11 @@ def parse_credential_ref(value: str) -> tuple[str, Path | None]:
 
 def build_auth_url(
     redirect_uri: str,
+    client_id: str,
     state: str | None = None,
     code_verifier: str | None = None,
 ) -> OAuthStart:
     state_value = state or secrets.token_urlsafe(32)
-    client_id = _oauth_client_id()
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -83,10 +82,16 @@ def build_auth_url(
     )
 
 
-def exchange_code(code: str, redirect_uri: str, code_verifier: str | None = None) -> dict[str, Any]:
+def exchange_code(
+    code: str,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str,
+    code_verifier: str | None = None,
+) -> dict[str, Any]:
     data = {
-        "client_id": _oauth_client_id(),
-        "client_secret": _oauth_client_secret(),
+        "client_id": client_id,
+        "client_secret": client_secret,
         "code": code,
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
@@ -103,13 +108,20 @@ def exchange_code(code: str, redirect_uri: str, code_verifier: str | None = None
 def refresh_access_token(credentials: dict[str, Any]) -> dict[str, Any]:
     refresh_token = str(credentials.get("refresh_token") or "").strip()
     if not refresh_token:
-        raise ValueError("Google Code Assist credentials do not contain refresh_token")
+        raise ValueError("Gemini CLI OAuth credentials do not contain refresh_token")
+    client_id = str(credentials.get("oauth_client_id") or "").strip()
+    client_secret = str(credentials.get("oauth_client_secret") or "").strip()
+    if not client_id or not client_secret:
+        raise ValueError(
+            "Gemini CLI OAuth credentials do not contain oauth_client_id/oauth_client_secret. "
+            "Run: sor providers connect google --manual-code"
+        )
     with httpx.Client(timeout=30) as client:
         response = client.post(
             TOKEN_URL,
             data={
-                "client_id": _oauth_client_id(),
-                "client_secret": _oauth_client_secret(),
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "refresh_token": refresh_token,
                 "grant_type": "refresh_token",
             },
@@ -210,7 +222,7 @@ def setup_user(credentials: dict[str, Any], project_id: str | None = None) -> di
     if not project:
         ineligible = load_result.get("ineligibleTiers") or []
         reason = ", ".join(str(item.get("reasonMessage") or item.get("reasonCode")) for item in ineligible)
-        raise ValueError(reason or "Google Code Assist did not return a usable project")
+        raise ValueError(reason or "Gemini CLI OAuth did not return a usable project")
 
     credentials["project_id"] = project
     credentials["user_tier"] = tier.get("id")
@@ -220,14 +232,18 @@ def setup_user(credentials: dict[str, Any], project_id: str | None = None) -> di
 
 def run_local_oauth_flow(
     profile: str = "main",
+    client_id: str = "",
+    client_secret: str = "",
     callback_host: str = "127.0.0.1",
     callback_port: int = 8765,
     open_browser: bool = False,
     project_id: str | None = None,
     base_dir: str | Path = "data/credentials",
 ) -> tuple[Path, dict[str, Any], str]:
+    client_id = _require_oauth_value(client_id, "client_id")
+    client_secret = _require_oauth_value(client_secret, "client_secret")
     redirect_uri = f"http://127.0.0.1:{callback_port}/oauth2callback"
-    oauth = build_auth_url(redirect_uri)
+    oauth = build_auth_url(redirect_uri, client_id=client_id)
     captured: dict[str, str] = {}
 
     class CallbackHandler(BaseHTTPRequestHandler):
@@ -242,7 +258,7 @@ def run_local_oauth_flow(
             captured["error"] = query.get("error", [""])[0]
             self.send_response(200 if captured.get("code") else 400)
             self.end_headers()
-            self.wfile.write(b"Google Code Assist authentication received. You can close this tab.")
+            self.wfile.write(b"Gemini CLI OAuth authentication received. You can close this tab.")
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -262,7 +278,9 @@ def run_local_oauth_flow(
     if not captured.get("code"):
         raise ValueError("OAuth callback did not include an authorization code")
 
-    credentials = exchange_code(captured["code"], oauth.redirect_uri)
+    credentials = exchange_code(captured["code"], oauth.redirect_uri, client_id, client_secret)
+    credentials["oauth_client_id"] = client_id
+    credentials["oauth_client_secret"] = client_secret
     email = fetch_user_email(str(credentials.get("access_token") or ""))
     if email:
         credentials["account_email"] = email
@@ -274,18 +292,24 @@ def run_local_oauth_flow(
 
 def run_manual_oauth_flow(
     profile: str = "main",
+    client_id: str = "",
+    client_secret: str = "",
     project_id: str | None = None,
     base_dir: str | Path = "data/credentials",
 ) -> tuple[Path, dict[str, Any], str]:
+    client_id = _require_oauth_value(client_id, "client_id")
+    client_secret = _require_oauth_value(client_secret, "client_secret")
     redirect_uri = "https://codeassist.google.com/authcode"
     code_verifier = secrets.token_urlsafe(64)
-    oauth = build_auth_url(redirect_uri, code_verifier=code_verifier)
+    oauth = build_auth_url(redirect_uri, client_id=client_id, code_verifier=code_verifier)
     print(f"Open this URL in your browser:\n{oauth.auth_url}\n")
     code = input("Paste authorization code: ").strip()
     if not code:
         raise ValueError("Authorization code is required")
 
-    credentials = exchange_code(code, oauth.redirect_uri, code_verifier=code_verifier)
+    credentials = exchange_code(code, oauth.redirect_uri, client_id, client_secret, code_verifier=code_verifier)
+    credentials["oauth_client_id"] = client_id
+    credentials["oauth_client_secret"] = client_secret
     email = fetch_user_email(str(credentials.get("access_token") or ""))
     if email:
         credentials["account_email"] = email
@@ -311,15 +335,8 @@ def _code_challenge(code_verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _oauth_client_id() -> str:
-    value = os.getenv("GOOGLE_CODE_ASSIST_OAUTH_CLIENT_ID", "").strip()
-    if not value:
-        raise ValueError("Set GOOGLE_CODE_ASSIST_OAUTH_CLIENT_ID before connecting Google Code Assist")
-    return value
-
-
-def _oauth_client_secret() -> str:
-    value = os.getenv("GOOGLE_CODE_ASSIST_OAUTH_CLIENT_SECRET", "").strip()
-    if not value:
-        raise ValueError("Set GOOGLE_CODE_ASSIST_OAUTH_CLIENT_SECRET before connecting Google Code Assist")
-    return value
+def _require_oauth_value(value: str, name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"Gemini CLI OAuth {name} is required")
+    return normalized

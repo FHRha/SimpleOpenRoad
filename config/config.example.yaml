@@ -123,7 +123,7 @@ providers:
   google_code_assist:
     enabled: false
     priority: 15
-    # Experimental Gemini CLI / Code Assist OAuth path for Google AI Pro / Ultra accounts.
+    # Experimental Gemini CLI OAuth path for Google AI Pro / Ultra accounts.
     # Configure with: sor providers connect google
     endpoint: https://cloudcode-pa.googleapis.com
     timeout_seconds: 120
