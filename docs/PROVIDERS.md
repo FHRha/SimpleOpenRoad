@@ -266,6 +266,24 @@ This provider is experimental. It uses the Gemini CLI / Code Assist OAuth path f
 
 The wizard asks for OAuth client id and secret, then stores them in the local credential profile alongside the refresh token. They are not written into `config/config.yaml`.
 
+When prompted:
+
+- `OAuth Client ID`: the Google OAuth client id, usually ending with `.apps.googleusercontent.com`.
+- `OAuth Client Secret`: the matching Google OAuth client secret, often starting with `GOCSPX-`.
+- `authorization code`: the code shown by Google after you open the printed URL and approve access.
+
+For manual code mode, the OAuth client must allow:
+
+```text
+https://codeassist.google.com/authcode
+```
+
+For callback mode, also allow:
+
+```text
+http://127.0.0.1:8765/oauth2callback
+```
+
 For a headless VPS, use manual code mode:
 
 ```bash
@@ -273,6 +291,8 @@ sor providers connect google --manual-code
 ```
 
 Open the printed URL in your browser, copy the authorization code, and paste it back into the VPS terminal.
+
+Copy only the authorization code back into the terminal. If you accidentally press `Ctrl+C`, the wizard reprints the URL and keeps waiting; type `q` to cancel.
 
 For a local machine with a browser and callback:
 

@@ -302,10 +302,11 @@ def run_manual_oauth_flow(
     redirect_uri = "https://codeassist.google.com/authcode"
     code_verifier = secrets.token_urlsafe(64)
     oauth = build_auth_url(redirect_uri, client_id=client_id, code_verifier=code_verifier)
-    print(f"Open this URL in your browser:\n{oauth.auth_url}\n")
-    code = input("Paste authorization code: ").strip()
-    if not code:
-        raise ValueError("Authorization code is required")
+    print("Open this URL in your browser:")
+    print(oauth.auth_url)
+    print()
+    print("Paste only the authorization code here. Type 'q' to cancel.")
+    code = _prompt_authorization_code(oauth.auth_url)
 
     credentials = exchange_code(code, oauth.redirect_uri, client_id, client_secret, code_verifier=code_verifier)
     credentials["oauth_client_id"] = client_id
@@ -333,6 +334,37 @@ def _without_none(payload: dict[str, Any]) -> dict[str, Any]:
 def _code_challenge(code_verifier: str) -> str:
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def _prompt_authorization_code(auth_url: str) -> str:
+    while True:
+        try:
+            code = input("Paste authorization code: ").strip()
+        except KeyboardInterrupt:
+            print("\nInterrupted while waiting for the code. The wizard is still running.")
+            print("Open this URL in your browser:")
+            print(auth_url)
+            print("Paste the authorization code, or type 'q' to cancel.")
+            continue
+        except EOFError as exc:
+            raise ValueError("Authorization code input was closed") from exc
+
+        if code.lower() in {"q", "quit", "exit", "cancel"}:
+            raise ValueError("Authorization cancelled")
+        if _looks_like_authorization_code(code):
+            return code
+        print("That does not look like an authorization code.")
+        print("Paste only the code from the browser page, not the full URL or terminal text.")
+
+
+def _looks_like_authorization_code(value: str) -> bool:
+    if not value or any(ch.isspace() for ch in value):
+        return False
+    if "http://" in value.lower() or "https://" in value.lower():
+        return False
+    if any(ord(ch) < 32 for ch in value):
+        return False
+    return len(value) >= 20
 
 
 def _require_oauth_value(value: str, name: str) -> str:

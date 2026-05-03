@@ -8,6 +8,7 @@ from app.config.models import ProviderConfig
 from app.core.errors import GatewayError
 from app.core.types import ChatMessage, UnifiedLLMRequest
 from app.credentials.google_code_assist import build_auth_url, parse_credential_ref
+from app.credentials import google_code_assist
 from app.providers.google_code_assist import GoogleCodeAssistAdapter
 
 
@@ -90,3 +91,11 @@ def test_google_manual_oauth_url_uses_codeassist_redirect_and_pkce() -> None:
     assert "redirect_uri=https%3A%2F%2Fcodeassist.google.com%2Fauthcode" in flow.auth_url
     assert "code_challenge_method=S256" in flow.auth_url
     assert flow.code_verifier == "v" * 64
+
+
+def test_google_authorization_code_validation_rejects_terminal_noise() -> None:
+    assert google_code_assist._looks_like_authorization_code("4/0Aan...valid-looking-code")  # noqa: SLF001
+    assert not google_code_assist._looks_like_authorization_code("")  # noqa: SLF001
+    assert not google_code_assist._looks_like_authorization_code("https://accounts.google.com/o/oauth2/v2/auth")  # noqa: SLF001
+    assert not google_code_assist._looks_like_authorization_code("^Croot@server:~#")  # noqa: SLF001
+    assert not google_code_assist._looks_like_authorization_code("code with spaces")  # noqa: SLF001

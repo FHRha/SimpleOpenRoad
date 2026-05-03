@@ -2582,10 +2582,24 @@ def providers_connect(
 
     cfg = load_gateway_config(config_path=config_path)
     credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
-    client_id = (oauth_client_id or typer.prompt("Gemini CLI OAuth client ID").strip()).strip()
+    if oauth_client_id is None or oauth_client_secret is None:
+        console.print(
+            "\nGemini CLI OAuth needs a Google OAuth Client ID and Client Secret from Google Cloud Console."
+        )
+        console.print("Create/select an OAuth client for this connector, then paste its values here.")
+        console.print("For --manual-code, the authorization page returns a code that you paste back into this terminal.")
+        console.print(
+            "If Google rejects the redirect URI, add this authorized redirect URI to the OAuth client: "
+            "https://codeassist.google.com/authcode"
+        )
+        console.print("For callback mode, also allow: http://127.0.0.1:<callback-port>/oauth2callback\n")
+    client_id = (
+        oauth_client_id
+        or typer.prompt("OAuth Client ID (looks like ...apps.googleusercontent.com)").strip()
+    ).strip()
     client_secret = (
         oauth_client_secret
-        or typer.prompt("Gemini CLI OAuth client secret", hide_input=True, confirmation_prompt=True).strip()
+        or typer.prompt("OAuth Client Secret (starts with GOCSPX- for many Google clients)", hide_input=True).strip()
     ).strip()
     if manual_code:
         path, credentials, _auth_url = run_manual_oauth_flow(
