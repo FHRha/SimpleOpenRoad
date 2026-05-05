@@ -2683,10 +2683,15 @@ def _gemini_cli_profile_source_path(auth_home: Path | None) -> Path | None:
         return None
     from app.credentials.google_code_assist import gemini_cli_credentials_path, gemini_cli_keychain_path
 
-    legacy = gemini_cli_credentials_path(auth_home)
-    if legacy.exists():
-        return legacy
-    return gemini_cli_keychain_path(auth_home)
+    oauth_creds = gemini_cli_credentials_path(auth_home)
+    if oauth_creds.exists():
+        return oauth_creds
+
+    keychain_creds = gemini_cli_keychain_path(auth_home)
+    if keychain_creds.exists():
+        return keychain_creds
+
+    return oauth_creds
 
 
 def _gemini_cli_credentials_exist(source_path: str | Path | None = None, auth_home: Path | None = None) -> bool:

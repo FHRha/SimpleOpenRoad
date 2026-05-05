@@ -17,6 +17,7 @@ from app.cli.app import _ensure_env_master_admin_keys
 from app.cli.app import _find_compatible_node
 from app.cli.app import _interactive_add_provider_key
 from app.cli.app import _model_alias_help_rows
+from app.cli.app import _gemini_cli_profile_source_path
 from app.cli.app import _parse_node_major_version
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
@@ -279,6 +280,21 @@ def test_gemini_cli_auth_wizard_uses_isolated_profile_home(monkeypatch, tmp_path
 
     assert observed == {"home": str(auth_home), "userprofile": str(auth_home)}
     assert auth_home.exists()
+
+
+def test_gemini_cli_profile_source_path_defaults_to_file_storage(tmp_path: Path) -> None:
+    auth_home = tmp_path / "profiles" / "work"
+
+    assert _gemini_cli_profile_source_path(auth_home) == auth_home / ".gemini" / "oauth_creds.json"
+
+
+def test_gemini_cli_profile_source_path_uses_existing_keychain_file(tmp_path: Path) -> None:
+    auth_home = tmp_path / "profiles" / "work"
+    keychain_path = auth_home / ".gemini" / "gemini-credentials.json"
+    keychain_path.parent.mkdir(parents=True)
+    keychain_path.write_text("encrypted", encoding="utf-8")
+
+    assert _gemini_cli_profile_source_path(auth_home) == keychain_path
 
 
 def test_parse_node_major_version() -> None:
