@@ -148,11 +148,6 @@ def test_import_gemini_cli_credentials_copies_profile(tmp_path, monkeypatch) -> 
         encoding="utf-8",
     )
     monkeypatch.setattr(google_code_assist, "fetch_user_email", lambda _token: "user@example.com")
-    monkeypatch.setattr(
-        google_code_assist,
-        "setup_user",
-        lambda credentials, project_id=None: {**credentials, "project_id": project_id or "project-1"},
-    )
 
     path, credentials = google_code_assist.import_gemini_cli_credentials(
         source_path=source,
@@ -163,4 +158,5 @@ def test_import_gemini_cli_credentials_copies_profile(tmp_path, monkeypatch) -> 
     assert path.exists()
     assert credentials["credential_source"] == "gemini_cli"
     assert credentials["account_email"] == "user@example.com"
-    assert json.loads(path.read_text(encoding="utf-8"))["project_id"] == "project-1"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert "project_id" not in saved

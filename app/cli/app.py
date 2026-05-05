@@ -2575,7 +2575,7 @@ def providers_connect(
     force_gemini_login: bool = typer.Option(False, help="Run Gemini CLI sign-in even if profile credentials already exist"),
     google_cloud_project: str | None = typer.Option(None, help="Optional Google Cloud project id"),
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
-    validate: bool = typer.Option(True, help="Validate provider after connecting"),
+    validate: bool = typer.Option(False, help="Validate provider after connecting"),
 ) -> None:
     if provider.strip().lower() not in {"google", "google_code_assist", "code_assist"}:
         raise typer.BadParameter("Only google is supported by providers connect right now")
@@ -2599,6 +2599,8 @@ def providers_connect(
         project_id=google_cloud_project,
         base_dir=credentials_base,
     )
+
+    console.print("Gemini CLI sign-in completed. Project setup will happen lazily on first use.")
 
     _configure_google_code_assist_provider(
         config_path=config_path,
@@ -5086,7 +5088,7 @@ def _run_gemini_cli_oauth_wizard(config_path: str) -> None:
         force_gemini_login=force_login,
         google_cloud_project=None,
         config_path=config_path,
-        validate=True,
+        validate=False,
     )
 
 

@@ -68,8 +68,11 @@ def ensure_access_token(credentials: dict[str, Any], leeway_seconds: int = 60) -
 
 
 def fetch_user_email(access_token: str) -> str | None:
-    with httpx.Client(timeout=30) as client:
-        response = client.get(USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"})
+    except httpx.HTTPError:
+        return None
     if response.status_code >= 400:
         return None
     payload = response.json()
@@ -183,10 +186,11 @@ def import_gemini_cli_credentials(
     credentials["credential_source"] = "gemini_cli"
     credentials["source_path"] = str(source)
     credentials = _normalize_imported_credentials(credentials)
+    if project_id:
+        credentials["project_id"] = project_id
     email = fetch_user_email(str(credentials.get("access_token") or ""))
     if email:
         credentials["account_email"] = email
-    credentials = setup_user(credentials, project_id=project_id)
     path = credential_path(profile, base_dir=base_dir)
     save_credentials(path, credentials)
     return path, credentials
