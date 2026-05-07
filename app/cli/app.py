@@ -2992,7 +2992,19 @@ def _run_gemini_cli_auth_if_needed(
 
         if authorization_code is None:
             console.print("OAuth stage: waiting for authorization code.")
-            authorization_code = typer.prompt("Enter the authorization code").strip() or None
+            while authorization_code is None:
+                try:
+                    entered_code = typer.prompt("Enter the authorization code").strip()
+                except KeyboardInterrupt:
+                    console.print(
+                        "OAuth stage: Ctrl+C ignored here so you can copy the authorization URL. "
+                        "Paste the code when ready, or type 'cancel' to abort."
+                    )
+                    console.print(auth_url)
+                    continue
+                if entered_code.lower() == "cancel":
+                    raise typer.BadParameter("Authorization code entry cancelled")
+                authorization_code = entered_code or None
         if not authorization_code:
             raise typer.BadParameter("Authorization code cannot be empty")
 

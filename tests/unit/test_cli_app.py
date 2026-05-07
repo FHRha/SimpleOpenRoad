@@ -180,6 +180,43 @@ def test_gemini_cli_auth_wizard_runs_direct_oauth_when_missing(monkeypatch, tmp_
     assert saved["account_email"] == "user@example.com"
 
 
+def test_gemini_cli_auth_wizard_ignores_ctrl_c_during_manual_code_entry(monkeypatch, tmp_path: Path) -> None:
+    credentials_base = tmp_path / "credentials"
+    prompt_calls = {"count": 0}
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.build_gemini_oauth_authorization_request",
+        lambda redirect_uri=None: ("https://example.invalid/auth", "verifier-token", "state-token"),
+    )
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.exchange_gemini_oauth_authorization_code",
+        lambda code, verifier, redirect_uri=None: {
+            "access_token": "manual-token",
+            "refresh_token": "refresh-token",
+            "expiry_date": 1234567890,
+        },
+    )
+    monkeypatch.setattr("app.credentials.google_code_assist.fetch_user_email", lambda token: "user@example.com")
+
+    def _prompt(message: str) -> str:
+        prompt_calls["count"] += 1
+        if prompt_calls["count"] == 1:
+            raise KeyboardInterrupt
+        return " authorization-code "
+
+    monkeypatch.setattr("app.cli.app.typer.prompt", _prompt)
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0, autoraise=True: observed.setdefault("url", url) or True)
+
+    result_path, credentials = _run_gemini_cli_auth_if_needed(profile="manual", base_dir=credentials_base)
+
+    expected_path = credential_path(profile="manual", base_dir=credentials_base)
+    assert result_path == expected_path
+    assert prompt_calls["count"] == 2
+    assert credentials["access_token"] == "manual-token"
+    assert observed["url"] == "https://example.invalid/auth"
+
+
 def test_gemini_cli_auth_wizard_uses_loopback_callback_when_available(monkeypatch, tmp_path: Path) -> None:
     credentials_base = tmp_path / "credentials"
     observed: dict[str, object] = {}
