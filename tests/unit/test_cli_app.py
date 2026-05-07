@@ -26,6 +26,7 @@ from app.cli.app import _select_test_alias
 from app.cli.app import _service_mode
 from app.cli.app import _service_unit_path
 from app.cli.app import _test_api_request
+from app.cli.app import providers_connect
 from app.credentials.google_code_assist import credential_path
 from app.storage.db import SQLiteDB
 
@@ -312,6 +313,40 @@ def test_providers_accounts_lists_multiple_google_profiles(tmp_path: Path) -> No
     assert rows[1]["account_email"] == "work@example.com"
     assert rows[1]["key_ids"] == "google-ai-pro-work"
     assert result.stdout.strip()
+
+
+def test_providers_connect_uses_direct_oauth_by_default(monkeypatch, tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path)
+    expected_path = tmp_path / "credentials" / "google_code_assist" / "main.json"
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.cli.app._run_gemini_cli_auth_if_needed",
+        lambda **kwargs: (expected_path, {"access_token": "oauth-token", "account_email": "user@example.com"}),
+    )
+    monkeypatch.setattr(
+        "app.cli.app._configure_google_code_assist_provider",
+        lambda **kwargs: observed.update(kwargs),
+    )
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.import_gemini_cli_credentials",
+        lambda *args, **kwargs: pytest.fail("legacy import path should not be used by default"),
+    )
+
+    providers_connect(
+        "google",
+        profile="main",
+        key_id="google-ai-pro-main",
+        gemini_cli_credentials_path=None,
+        force_gemini_login=False,
+        google_cloud_project=None,
+        config_path=str(config_path),
+        validate=False,
+    )
+
+    assert observed["path"] == expected_path
+    assert observed["credentials"]["access_token"] == "oauth-token"
+    assert observed["key_id"] == "google-ai-pro-main"
 
 
 def test_cli_without_args_opens_management_panel(monkeypatch) -> None:

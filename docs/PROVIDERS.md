@@ -262,15 +262,12 @@ sor keys add --provider gemini --key-id gemini-main --secret <TOKEN>
 
 ## Google OAuth for Gemini Code Assist
 
-SimpleOpenRoad can connect Gemini Code Assist accounts with its own OAuth pipeline instead of depending on the Gemini CLI runtime. The flow uses PKCE, opens the system browser for consent, and stores credentials per local profile under `data/credentials/google_code_assist/`.
+SimpleOpenRoad can connect Gemini Code Assist accounts with its own OAuth pipeline. The flow uses PKCE, opens the system browser for consent, and stores credentials per local profile under `data/credentials/google_code_assist/`.
 
-Environment variables required by the OAuth exchange:
+By default, the wizard uses the built-in installed-app Google OAuth client, so no env setup is needed for a normal local sign-in. Advanced users can override the client or redirect target with:
 
 - `GEMINI_OAUTH_CLIENT_ID`
 - `GEMINI_OAUTH_CLIENT_SECRET`
-
-Optional redirect override for local callback mode:
-
 - `GEMINI_OAUTH_REDIRECT_URI`
 
 Recommended usage:
@@ -288,21 +285,15 @@ Legacy Gemini CLI credential files are still supported for imports when you alre
 
 ## Gemini CLI OAuth
 
-This provider is experimental. It uses the Gemini CLI / Code Assist OAuth path for Google AI Pro or Ultra accounts. It is separate from the public Gemini API key provider and from Vertex AI.
+This provider is experimental. It is separate from the public Gemini API key provider and from Vertex AI.
 
-The recommended path is to let SimpleOpenRoad start the official Gemini CLI sign-in, then import that credential profile. This is the path to use on a headless VPS too: no SSH tunnel is needed because the browser login is handled by the official Gemini CLI flow.
+The recommended path is to let SimpleOpenRoad open the browser sign-in directly. This works for normal desktops and also for remote machines when you use the loopback callback or manual code fallback.
 
 ```bash
 sor providers connect google
 ```
 
-If Gemini CLI credentials are missing, SimpleOpenRoad runs the official Gemini CLI with `GEMINI_FORCE_FILE_STORAGE=true` and `NO_BROWSER=true`, waits for you to finish Google sign-in, then continues automatically.
-
-Gemini CLI requires Node.js 20 or newer. The wizard tries to pick a compatible Node.js automatically, including `node`, `nodejs`, common `nvm` installs under `~/.nvm/versions/node/`, `/usr/local/bin`, and `/opt/node*/bin/node`. If it only finds an old version such as `v12.22.9`, upgrade or activate Node.js 20+, then run the wizard again.
-
-SimpleOpenRoad imports the official Gemini CLI credentials from `~/.gemini/gemini-credentials.json` or legacy `~/.gemini/oauth_creds.json`, copies them into `data/credentials/google_code_assist/`, validates the Code Assist backend, and stores only an `oauth-file:` reference in `config/config.yaml`.
-
-`GEMINI_FORCE_FILE_STORAGE=true` makes Gemini CLI store credentials in a local encrypted file that SimpleOpenRoad can import on a server. Without it, some desktop/server environments may store tokens in the OS keychain instead, which SimpleOpenRoad cannot read directly.
+SimpleOpenRoad stores the resulting credentials per profile and writes only an `oauth-file:` reference into `config/config.yaml`.
 
 You can connect multiple Google accounts by using different profiles and key ids:
 
@@ -311,7 +302,7 @@ sor providers connect google --profile personal --key-id google-ai-pro-personal
 sor providers connect google --profile work --key-id google-ai-pro-work --force-gemini-login
 ```
 
-The interactive `Connect Gemini CLI OAuth` wizard asks for the profile and key id. Each profile gets its own isolated Gemini CLI sign-in directory under `data/credentials/google_code_assist/gemini-cli-homes/`, so signing in to one account does not overwrite another SimpleOpenRoad profile.
+The interactive `Connect Google OAuth` wizard asks for the profile and key id. Each profile gets its own saved credential file under `data/credentials/google_code_assist/`, so signing in to one account does not overwrite another SimpleOpenRoad profile.
 
 `Local profile` is only a local SimpleOpenRoad slot name, for example `main`, `personal`, or `work`. It is not your Google email and not a password. `Key ID` is the local provider key name shown in logs, validation, routing, and key management.
 

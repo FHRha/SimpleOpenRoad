@@ -26,6 +26,7 @@ CODE_ASSIST_VERSION = "v1internal"
 GEMINI_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GEMINI_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 GEMINI_OAUTH_DEFAULT_REDIRECT_URI = "https://codeassist.google.com/authcode"
+GEMINI_OAUTH_DEFAULT_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 GEMINI_OAUTH_SCOPES = [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -458,20 +459,11 @@ def _base64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def _gemini_oauth_client_credentials() -> tuple[str, str]:
-    client_id = (os.getenv("GEMINI_OAUTH_CLIENT_ID") or "").strip()
-    client_secret = (os.getenv("GEMINI_OAUTH_CLIENT_SECRET") or "").strip()
-    missing: list[str] = []
+def _gemini_oauth_client_credentials() -> tuple[str, str | None]:
+    client_id = (os.getenv("GEMINI_OAUTH_CLIENT_ID") or GEMINI_OAUTH_DEFAULT_CLIENT_ID).strip()
+    client_secret = (os.getenv("GEMINI_OAUTH_CLIENT_SECRET") or "").strip() or None
     if not client_id:
-        missing.append("GEMINI_OAUTH_CLIENT_ID")
-    if not client_secret:
-        missing.append("GEMINI_OAUTH_CLIENT_SECRET")
-    if missing:
-        names = ", ".join(missing)
-        raise ValueError(
-            "Gemini OAuth client credentials are not configured. Set "
-            f"{names} in the environment before running providers connect."
-        )
+        raise ValueError("Gemini OAuth client ID is not configured")
     return client_id, client_secret
 def _credential_expires_at(credentials: dict[str, Any]) -> int:
     expires_at = int(credentials.get("expires_at") or 0)

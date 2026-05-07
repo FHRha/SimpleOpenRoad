@@ -2684,23 +2684,25 @@ def providers_connect(
 
     cfg = load_gateway_config(config_path=config_path)
     credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
-    auth_home = _gemini_cli_profile_home(credentials_base, profile) if gemini_cli_credentials_path is None else None
     if gemini_cli_credentials_path is not None:
-        source_path = gemini_cli_credentials_path
-    elif auth_home is not None:
-        source_path = str(_gemini_cli_profile_source_path(auth_home))
+        source_path = Path(gemini_cli_credentials_path).expanduser()
+        console.print(f"\nImporting existing credentials from {source_path}.")
+        path, credentials = import_gemini_cli_credentials(
+            profile=profile,
+            source_path=source_path,
+            project_id=google_cloud_project,
+            base_dir=credentials_base,
+        )
     else:
-        source_path = None
-    console.print("\nImporting credentials from the official Gemini CLI.")
-    _run_gemini_cli_auth_if_needed(source_path, auth_home=auth_home, force=force_gemini_login)
-    path, credentials = import_gemini_cli_credentials(
-        profile=profile,
-        source_path=source_path,
-        project_id=google_cloud_project,
-        base_dir=credentials_base,
-    )
+        console.print("\nStarting Google sign-in for this profile.")
+        path, credentials = _run_gemini_cli_auth_if_needed(
+            profile=profile,
+            base_dir=credentials_base,
+            project_id=google_cloud_project,
+            force=force_gemini_login,
+        )
 
-    console.print("Gemini CLI sign-in completed. Project setup will happen lazily on first use.")
+    console.print("Google sign-in completed. Project setup will happen lazily on first use.")
 
     _configure_google_code_assist_provider(
         config_path=config_path,
@@ -2767,7 +2769,7 @@ def _configure_google_code_assist_provider(
         keys.append(key_data)
 
     _save_yaml(config_file, data)
-    console.print(f"Connected Gemini CLI OAuth account: {credentials.get('account_email') or '<unknown>'}")
+    console.print(f"Connected Google OAuth account: {credentials.get('account_email') or '<unknown>'}")
     console.print(f"Credentials saved: {path}")
     console.print(f"Provider key configured: google_code_assist/{key_id}")
 

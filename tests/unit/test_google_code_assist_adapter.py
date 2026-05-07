@@ -88,6 +88,16 @@ def test_gemini_oauth_redirect_uri_uses_environment(monkeypatch) -> None:
     assert google_code_assist.gemini_oauth_redirect_uri() == "http://127.0.0.1:8085/authcode"
 
 
+def test_google_oauth_client_credentials_use_builtin_default(monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_OAUTH_CLIENT_ID", raising=False)
+    monkeypatch.delenv("GEMINI_OAUTH_CLIENT_SECRET", raising=False)
+
+    client_id, client_secret = google_code_assist._gemini_oauth_client_credentials()  # noqa: SLF001
+
+    assert client_id == "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+    assert client_secret is None
+
+
 def test_local_oauth_callback_listener_receives_code() -> None:
     listener = google_code_assist.start_oauth_callback_listener("http://127.0.0.1:0/authcode")
     try:
