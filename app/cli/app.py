@@ -2425,6 +2425,106 @@ def providers_list(
     console.print(table)
 
 
+@providers_app.command("accounts")
+def providers_accounts(
+    config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
+) -> None:
+    _print_google_code_assist_accounts(config_path=config_path)
+
+
+def _print_google_code_assist_accounts(config_path: str) -> None:
+    rows = _google_code_assist_account_rows(config_path=config_path)
+    table = Table(title="Google Code Assist Accounts", box=box.ASCII)
+    table.add_column("Profile")
+    table.add_column("Key IDs")
+    table.add_column("Account")
+    table.add_column("Project")
+    table.add_column("Tier")
+    table.add_column("Status")
+    table.add_column("Path", overflow="fold")
+
+    if not rows:
+        table.add_row("-", "-", "-", "-", "-", "<empty>", "-")
+        console.print(table)
+        return
+
+    for row in rows:
+        table.add_row(
+            str(row.get("profile", "")) or "-",
+            str(row.get("key_ids", "")) or "-",
+            str(row.get("account_email", "")) or "-",
+            str(row.get("project_id", "")) or "-",
+            str(row.get("user_tier_name", "") or row.get("user_tier", "")) or "-",
+            str(row.get("status", "")) or "-",
+            str(row.get("path", "")) or "-",
+        )
+    console.print(table)
+
+
+def _google_code_assist_account_rows(config_path: str) -> list[dict[str, Any]]:
+    from app.credentials.google_code_assist import credential_path, load_credentials, parse_credential_ref
+
+    cfg = load_gateway_config(config_path=config_path)
+    credentials_base = Path(cfg.storage.sqlite_path).parent / "credentials"
+    provider_cfg = cfg.providers.get("google_code_assist")
+    configured_keys = list(getattr(provider_cfg, "keys", []) or [])
+
+    key_ids_by_profile: dict[str, list[str]] = {}
+    for item in configured_keys:
+        key_id = str(getattr(item, "id", None) if not isinstance(item, dict) else item.get("id", "")).strip()
+        key_ref = str(getattr(item, "key", None) if not isinstance(item, dict) else item.get("key", "")).strip()
+        if not key_id or not key_ref:
+            continue
+        profile, explicit_path = parse_credential_ref(key_ref)
+        account_profile = Path(explicit_path).stem if explicit_path is not None else profile
+        key_ids_by_profile.setdefault(account_profile, []).append(key_id)
+
+    rows: list[dict[str, Any]] = []
+    accounts_dir = credentials_base / "google_code_assist"
+    if accounts_dir.exists():
+        for path in sorted(accounts_dir.glob("*.json")):
+            try:
+                credentials = load_credentials(path)
+                status = "configured"
+            except Exception as exc:  # noqa: BLE001
+                credentials = {}
+                status = f"unreadable: {exc}"
+            profile_name = path.stem
+            rows.append(
+                {
+                    "profile": profile_name,
+                    "path": str(path),
+                    "key_ids": ", ".join(key_ids_by_profile.get(profile_name, [])),
+                    "account_email": credentials.get("account_email"),
+                    "project_id": credentials.get("project_id"),
+                    "user_tier": credentials.get("user_tier"),
+                    "user_tier_name": credentials.get("user_tier_name"),
+                    "status": status,
+                }
+            )
+
+    existing_paths = {row["path"] for row in rows}
+    for profile_name, key_ids in sorted(key_ids_by_profile.items()):
+        path_text = str(credential_path(profile_name, base_dir=credentials_base))
+        if path_text in existing_paths:
+            continue
+        rows.append(
+            {
+                "profile": profile_name,
+                "path": path_text,
+                "key_ids": ", ".join(key_ids),
+                "account_email": None,
+                "project_id": None,
+                "user_tier": None,
+                "user_tier_name": None,
+                "status": "missing",
+            }
+        )
+
+    rows.sort(key=lambda item: (str(item.get("profile", "")), str(item.get("path", ""))))
+    return rows
+
+
 @providers_app.command("inventory")
 def providers_inventory(
     config_path: str = typer.Option("config/config.yaml", help="Path to config.yaml"),
@@ -2819,79 +2919,99 @@ def _run_gemini_cli_auth_if_needed(
     source_path: str | Path | None = None,
     auth_home: Path | None = None,
     force: bool = False,
-) -> None:
-    if not force and _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
-        console.print("Gemini CLI credentials found. Continuing with import.")
-        return
-    if force:
-        _clear_gemini_cli_auth_credentials(source_path, auth_home=auth_home)
-
-    console.print("Gemini CLI credentials were not found. Starting official Gemini CLI sign-in now.")
-    console.print("Open the URL/code shown by Gemini CLI in your browser and finish Google sign-in.")
-    console.print("SimpleOpenRoad will continue automatically after Gemini CLI exits.\n")
-
-    env = os.environ.copy()
-    env["GEMINI_FORCE_FILE_STORAGE"] = "true"
-    env["NO_BROWSER"] = "true"
-    compatible_node = _find_compatible_node()
-    env["PATH"] = f"{compatible_node.parent}{os.pathsep}{env.get('PATH', '')}"
-    if auth_home is not None:
-        auth_home.mkdir(parents=True, exist_ok=True)
-        env["HOME"] = str(auth_home)
-        env["USERPROFILE"] = str(auth_home)
-    proc = subprocess.Popen(_gemini_cli_auth_command(), env=env)
-    deadline = time.monotonic() + GEMINI_CLI_AUTH_TIMEOUT_SECONDS
-    while True:
-        if _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
-            time.sleep(1.0)
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
-            break
-
-        returncode = proc.poll()
-        if returncode is not None:
-            if returncode != 0:
-                raise typer.BadParameter("Gemini CLI sign-in did not complete successfully")
-            break
-
-        if time.monotonic() >= deadline:
-            if proc.poll() is None:
-                proc.terminate()
-            raise typer.BadParameter("Timed out waiting for Gemini CLI sign-in to create credentials")
-
-        time.sleep(1.0)
-
-    if not _gemini_cli_credentials_exist(source_path, auth_home=auth_home):
-        raise typer.BadParameter(
-            "Gemini CLI finished, but credentials were still not found. "
-            "Run `GEMINI_FORCE_FILE_STORAGE=true gemini` manually and try again."
-        )
-    console.print("\nGemini CLI credentials created. Continuing with SimpleOpenRoad import.")
-
-
-def _clear_gemini_cli_auth_credentials(source_path: str | Path | None, auth_home: Path | None = None) -> None:
-    from app.credentials.google_code_assist import gemini_cli_credentials_path, gemini_cli_keychain_path
-
-    paths: list[Path] = []
-    if source_path:
-        paths.append(Path(source_path).expanduser())
-    if auth_home is not None:
-        paths.extend([gemini_cli_credentials_path(auth_home), gemini_cli_keychain_path(auth_home)])
-    seen: set[Path] = set()
-    for path in paths:
-        if path in seen:
-            continue
-        seen.add(path)
+    profile: str = "main",
+    base_dir: str | Path = "data/credentials",
+    project_id: str | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    from app.credentials.google_code_assist import (
+        build_gemini_oauth_authorization_request,
+        credential_path,
+        exchange_gemini_oauth_authorization_code,
+        fetch_user_email,
+        gemini_oauth_redirect_uri,
+        load_credentials,
+        is_loopback_redirect_uri,
+        start_oauth_callback_listener,
+        save_credentials,
+    )
+    console.print("OAuth stage: checking for existing credentials.")
+    if source_path and not force:
+        source = Path(source_path).expanduser()
+        if source.exists():
+            console.print("OAuth stage: reusing existing credentials.")
+            return source, load_credentials(source)
+    target_path = credential_path(profile=profile, base_dir=base_dir)
+    if target_path.exists() and not force:
+        console.print("OAuth stage: reusing existing profile credentials.")
+        return target_path, load_credentials(target_path)
+    if force and target_path.exists():
         try:
-            if path.exists():
-                path.unlink()
-        except OSError as exc:
-            raise typer.BadParameter(f"Could not clear existing Gemini CLI credentials at {path}: {exc}") from exc
+            target_path.unlink()
+        except OSError:
+            pass
+
+    configured_redirect_uri = gemini_oauth_redirect_uri()
+    callback_listener = None
+    redirect_uri = configured_redirect_uri
+    if is_loopback_redirect_uri(configured_redirect_uri):
+        try:
+            callback_listener = start_oauth_callback_listener(configured_redirect_uri)
+            redirect_uri = callback_listener.redirect_uri
+            console.print(f"OAuth stage: using local callback redirect {redirect_uri}")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"OAuth stage: local callback unavailable, falling back to manual code entry ({exc})")
+            callback_listener = None
+            redirect_uri = configured_redirect_uri
+
+    auth_url, code_verifier, auth_state = build_gemini_oauth_authorization_request(redirect_uri=redirect_uri)
+    console.print("OAuth stage: opening browser for Google consent.")
+    console.print("If the browser does not open, use this URL:")
+    console.print(auth_url)
+    try:
+        import webbrowser
+
+        webbrowser.open(auth_url, new=1, autoraise=True)
+    except Exception:
+        pass
+
+    authorization_code: str | None = None
+    try:
+        if callback_listener is not None:
+            console.print("OAuth stage: waiting for browser callback.")
+            callback_code, callback_error = callback_listener.wait_for_code(expected_state=auth_state, timeout_seconds=300)
+            if callback_code:
+                authorization_code = callback_code
+                console.print("OAuth stage: callback received.")
+            else:
+                console.print(
+                    "OAuth stage: callback did not complete ("
+                    f"{callback_error or 'unknown'}); falling back to manual code entry."
+                )
+
+        if authorization_code is None:
+            console.print("OAuth stage: waiting for authorization code.")
+            authorization_code = typer.prompt("Enter the authorization code").strip() or None
+        if not authorization_code:
+            raise typer.BadParameter("Authorization code cannot be empty")
+
+        console.print("OAuth stage: exchanging code for tokens.")
+        credentials = exchange_gemini_oauth_authorization_code(authorization_code, code_verifier, redirect_uri=redirect_uri)
+        credentials["credential_source"] = "gemini_cli"
+        credentials["source_path"] = "interactive-oauth"
+        if project_id:
+            credentials["project_id"] = project_id
+
+        account_email = fetch_user_email(str(credentials.get("access_token") or ""))
+        if account_email:
+            credentials["account_email"] = account_email
+
+        console.print("OAuth stage: saving credentials.")
+        save_credentials(target_path, credentials)
+        console.print("OAuth stage: ready.")
+        return target_path, credentials
+    finally:
+        if callback_listener is not None:
+            callback_listener.close()
 
 
 @providers_app.command("test")
@@ -5099,11 +5219,12 @@ def _run_keys_panel(config_path: str) -> None:
             config_path=config_path,
             lines=[
                 "1) Add provider key (wizard)",
-                "2) Connect Gemini CLI OAuth",
+                "2) Connect Google OAuth for Gemini Code Assist",
                 "3) View providers and keys",
                 "4) Validate keys",
                 "5) Manage existing key",
                 "6) Clean unconfigured placeholder keys",
+                "7) View Google accounts",
                 "0) Back",
             ],
         )
@@ -5125,6 +5246,9 @@ def _run_keys_panel(config_path: str) -> None:
             elif choice == "6":
                 removed = _remove_unconfigured_provider_keys(config_path=config_path)
                 console.print(f"Removed unconfigured placeholder keys: {removed}")
+                _pause()
+            elif choice == "7":
+                _print_google_code_assist_accounts(config_path=config_path)
                 _pause()
             elif choice == "0":
                 return

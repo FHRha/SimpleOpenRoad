@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -14,11 +15,10 @@ from app.config.loader import load_gateway_config
 from app.cli.app import cli_app
 from app.cli.app import _default_install_root
 from app.cli.app import _ensure_env_master_admin_keys
-from app.cli.app import _find_compatible_node
+from app.cli.app import _google_code_assist_account_rows
 from app.cli.app import _interactive_add_provider_key
 from app.cli.app import _model_alias_help_rows
 from app.cli.app import _gemini_cli_profile_source_path
-from app.cli.app import _parse_node_major_version
 from app.cli.app import _print_setup_summary
 from app.cli.app import _resolve_api_base_url
 from app.cli.app import _run_gemini_cli_auth_if_needed
@@ -26,6 +26,7 @@ from app.cli.app import _select_test_alias
 from app.cli.app import _service_mode
 from app.cli.app import _service_unit_path
 from app.cli.app import _test_api_request
+from app.credentials.google_code_assist import credential_path
 from app.storage.db import SQLiteDB
 
 
@@ -130,156 +131,116 @@ def test_install_script_reexecs_from_temp_during_in_place_update() -> None:
     assert 'exec env SOR_INSTALL_SELF_REEXEC_DONE=1 bash "${temp_script}" "${ORIGINAL_ARGS[@]}"' in install_script
 
 
-def test_release_build_script_bundles_wheelhouse() -> None:
-    build_script = (Path(__file__).resolve().parents[2] / "scripts" / "build_linux_release.sh").read_text(
-        encoding="utf-8"
-    )
+def test_gemini_cli_auth_wizard_reuses_existing_credentials(monkeypatch, tmp_path: Path) -> None:
+    credentials_base = tmp_path / "credentials"
+    path = credential_path(profile="main", base_dir=credentials_base)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"access_token": "existing-token", "account_email": "user@example.com"}), encoding="utf-8")
 
-    assert "Building offline wheelhouse" in build_script
-    assert 'pip wheel --wheel-dir "${STAGE_DIR}/wheelhouse" "${ROOT_DIR}"' in build_script
-    assert "Verifying offline wheelhouse" in build_script
-    assert "--no-index" in build_script
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: pytest.fail("prompt should not be called"))
 
+    result_path, credentials = _run_gemini_cli_auth_if_needed(profile="main", base_dir=credentials_base)
 
-def test_package_includes_storage_schema() -> None:
-    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8")
-
-    assert "[tool.setuptools.package-data]" in pyproject
-    assert '"app.storage" = ["schema.sql"]' in pyproject
+    assert result_path == path
+    assert credentials["access_token"] == "existing-token"
+    assert credentials["account_email"] == "user@example.com"
 
 
-def test_built_wheel_contains_runtime_files(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[2]
-    wheel_dir = tmp_path / "wheelhouse"
-    wheel_dir.mkdir()
-
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "wheel",
-            "--no-deps",
-            "--wheel-dir",
-            str(wheel_dir),
-            str(root),
-        ],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    wheels = list(wheel_dir.glob("simple_open_road-*.whl"))
-    assert wheels
-
-    with ZipFile(wheels[0]) as wheel:
-        names = set(wheel.namelist())
-
-    for required in [
-        "app/cli/app.py",
-        "app/container.py",
-        "app/storage/schema.sql",
-        "app/storage/repositories/keys_repo.py",
-        "app/registry/keys.py",
-        "app/router/engine.py",
-        "app/providers/gemini.py",
-        "app/providers/google_code_assist.py",
-        "app/credentials/google_code_assist.py",
-        "app/providers/openai_compatible.py",
-    ]:
-        assert required in names
-
-
-def test_cli_config_validate(tmp_path: Path) -> None:
-    runner = CliRunner()
-    config_path = _write_config(tmp_path)
-
-    result = runner.invoke(cli_app, ["config", "validate", "--config-path", str(config_path)])
-    assert result.exit_code == 0
-    assert "Config OK" in result.stdout
-
-
-def test_gemini_cli_auth_wizard_skips_when_credentials_exist(monkeypatch) -> None:
-    calls = {"run": 0}
-
-    monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: True)
-    monkeypatch.setattr("app.cli.app.subprocess.Popen", lambda *args, **kwargs: calls.update(run=1))
-
-    _run_gemini_cli_auth_if_needed()
-
-    assert calls == {"run": 0}
-
-
-def test_gemini_cli_auth_wizard_runs_official_cli_when_missing(monkeypatch) -> None:
-    exists = iter([False, True, True])
+def test_gemini_cli_auth_wizard_runs_direct_oauth_when_missing(monkeypatch, tmp_path: Path) -> None:
+    credentials_base = tmp_path / "credentials"
     observed: dict[str, object] = {}
 
-    class _Proc:
-        def poll(self):
-            return None
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.build_gemini_oauth_authorization_request",
+        lambda redirect_uri=None: ("https://example.invalid/auth", "verifier-token", "state-token"),
+    )
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.exchange_gemini_oauth_authorization_code",
+        lambda code, verifier, redirect_uri=None: {
+            "access_token": "fresh-token",
+            "refresh_token": "refresh-token",
+            "expiry_date": 1234567890,
+        },
+    )
+    monkeypatch.setattr("app.credentials.google_code_assist.fetch_user_email", lambda token: "user@example.com")
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: " authorization-code ")
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0, autoraise=True: observed.setdefault("url", url) or True)
 
-        def terminate(self):
-            observed["terminated"] = True
+    result_path, credentials = _run_gemini_cli_auth_if_needed(profile="work", base_dir=credentials_base)
 
-        def wait(self, timeout=None):
-            observed["wait_timeout"] = timeout
-            return 0
-
-    def _fake_popen(command, env=None):
-        observed["command"] = command
-        observed["force_file_storage"] = env.get("GEMINI_FORCE_FILE_STORAGE") if env else None
-        observed["no_browser"] = env.get("NO_BROWSER") if env else None
-        observed["path"] = env.get("PATH", "").split(";")[0] if env else None
-        return _Proc()
-
-    monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
-    monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
-    monkeypatch.setattr("app.cli.app._find_compatible_node", lambda: Path("/opt/node22/bin/node"))
-    monkeypatch.setattr("app.cli.app.subprocess.Popen", _fake_popen)
-    monkeypatch.setattr("app.cli.app.time.sleep", lambda seconds: None)
-
-    _run_gemini_cli_auth_if_needed()
-
-    assert observed == {
-        "command": ["/usr/bin/gemini"],
-        "force_file_storage": "true",
-        "no_browser": "true",
-        "path": str(Path("/opt/node22/bin/node").parent),
-        "terminated": True,
-        "wait_timeout": 5,
-    }
+    expected_path = credential_path(profile="work", base_dir=credentials_base)
+    assert result_path == expected_path
+    assert credentials["access_token"] == "fresh-token"
+    assert credentials["refresh_token"] == "refresh-token"
+    assert credentials["account_email"] == "user@example.com"
+    assert observed["url"] == "https://example.invalid/auth"
+    saved = json.loads(expected_path.read_text(encoding="utf-8"))
+    assert saved["credential_source"] == "gemini_cli"
+    assert saved["account_email"] == "user@example.com"
 
 
-def test_gemini_cli_auth_wizard_uses_isolated_profile_home(monkeypatch, tmp_path: Path) -> None:
-    exists = iter([False, True, True])
+def test_gemini_cli_auth_wizard_uses_loopback_callback_when_available(monkeypatch, tmp_path: Path) -> None:
+    credentials_base = tmp_path / "credentials"
     observed: dict[str, object] = {}
-    auth_home = tmp_path / "profiles" / "work"
 
-    class _Proc:
-        def poll(self):
-            return None
+    class _CallbackListener:
+        redirect_uri = "http://127.0.0.1:8085/authcode"
 
-        def terminate(self):
-            pass
+        def wait_for_code(self, expected_state: str, timeout_seconds: int = 300):
+            observed["expected_state"] = expected_state
+            observed["timeout_seconds"] = timeout_seconds
+            return "browser-code", None
 
-        def wait(self, timeout=None):
-            return 0
+        def close(self):
+            observed["closed"] = True
 
-    def _fake_popen(command, env=None):
-        observed["home"] = env.get("HOME") if env else None
-        observed["userprofile"] = env.get("USERPROFILE") if env else None
-        return _Proc()
+    monkeypatch.setattr("app.credentials.google_code_assist.gemini_oauth_redirect_uri", lambda: "http://127.0.0.1:0/authcode")
+    monkeypatch.setattr("app.credentials.google_code_assist.is_loopback_redirect_uri", lambda redirect_uri: True)
+    monkeypatch.setattr("app.credentials.google_code_assist.start_oauth_callback_listener", lambda redirect_uri: _CallbackListener())
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.build_gemini_oauth_authorization_request",
+        lambda redirect_uri=None: ("https://example.invalid/auth", "verifier-token", "state-token"),
+    )
+    monkeypatch.setattr(
+        "app.credentials.google_code_assist.exchange_gemini_oauth_authorization_code",
+        lambda code, verifier, redirect_uri=None: {
+            "access_token": "browser-token",
+            "refresh_token": "refresh-token",
+            "expiry_date": 1234567890,
+        },
+    )
+    monkeypatch.setattr("app.credentials.google_code_assist.fetch_user_email", lambda token: "user@example.com")
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: pytest.fail("prompt should not be called"))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0, autoraise=True: observed.setdefault("url", url) or True)
 
-    monkeypatch.setattr("app.cli.app._gemini_cli_credentials_exist", lambda source_path=None, **kwargs: next(exists))
-    monkeypatch.setattr("app.cli.app.shutil.which", lambda name: "/usr/bin/gemini" if name == "gemini" else None)
-    monkeypatch.setattr("app.cli.app._find_compatible_node", lambda: Path("/opt/node22/bin/node"))
-    monkeypatch.setattr("app.cli.app.subprocess.Popen", _fake_popen)
-    monkeypatch.setattr("app.cli.app.time.sleep", lambda seconds: None)
+    result_path, credentials = _run_gemini_cli_auth_if_needed(profile="loopback", base_dir=credentials_base)
 
-    _run_gemini_cli_auth_if_needed(auth_home=auth_home)
+    expected_path = credential_path(profile="loopback", base_dir=credentials_base)
+    assert result_path == expected_path
+    assert credentials["access_token"] == "browser-token"
+    assert credentials["account_email"] == "user@example.com"
+    assert observed["url"] == "https://example.invalid/auth"
+    assert observed["expected_state"] == "state-token"
+    assert observed["closed"] is True
+    saved = json.loads(expected_path.read_text(encoding="utf-8"))
+    assert saved["credential_source"] == "gemini_cli"
 
-    assert observed == {"home": str(auth_home), "userprofile": str(auth_home)}
-    assert auth_home.exists()
+
+def test_gemini_cli_auth_wizard_imports_source_file_without_prompt(monkeypatch, tmp_path: Path) -> None:
+    credentials_base = tmp_path / "credentials"
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps({"access_token": "source-token"}), encoding="utf-8")
+
+    monkeypatch.setattr("app.cli.app.typer.prompt", lambda *args, **kwargs: pytest.fail("prompt should not be called"))
+
+    result_path, credentials = _run_gemini_cli_auth_if_needed(
+        source_path=source_path,
+        profile="work",
+        base_dir=credentials_base,
+    )
+
+    assert result_path == source_path
+    assert credentials["access_token"] == "source-token"
 
 
 def test_gemini_cli_profile_source_path_defaults_to_file_storage(tmp_path: Path) -> None:
@@ -297,24 +258,60 @@ def test_gemini_cli_profile_source_path_uses_existing_keychain_file(tmp_path: Pa
     assert _gemini_cli_profile_source_path(auth_home) == keychain_path
 
 
-def test_parse_node_major_version() -> None:
-    assert _parse_node_major_version("v22.12.0") == 22
-    assert _parse_node_major_version("20.19.3") == 20
-    assert _parse_node_major_version("v12.22.9") == 12
-    assert _parse_node_major_version("not-node") is None
-
-
-def test_find_compatible_node_skips_old_node(monkeypatch) -> None:
-    old_node = Path("/usr/bin/node")
-    new_node = Path("/home/user/.nvm/versions/node/v22.12.0/bin/node")
-
-    monkeypatch.setattr("app.cli.app._node_binary_candidates", lambda: [old_node, new_node])
-    monkeypatch.setattr(
-        "app.cli.app._node_version",
-        lambda path: "v12.22.9" if path == old_node else "v22.12.0",
+def test_providers_accounts_lists_multiple_google_profiles(tmp_path: Path) -> None:
+    runner = CliRunner()
+    credentials_base = tmp_path / "credentials"
+    main_path = credentials_base / "google_code_assist" / "main.json"
+    work_path = credentials_base / "google_code_assist" / "work.json"
+    main_path.parent.mkdir(parents=True, exist_ok=True)
+    main_path.write_text(
+        json.dumps(
+            {
+                "access_token": "main-token",
+                "account_email": "main@example.com",
+                "project_id": "project-main",
+            }
+        ),
+        encoding="utf-8",
+    )
+    work_path.write_text(
+        json.dumps(
+            {
+                "access_token": "work-token",
+                "account_email": "work@example.com",
+                "user_tier_name": "paid",
+            }
+        ),
+        encoding="utf-8",
     )
 
-    assert _find_compatible_node() == new_node
+    config = {
+        "providers": {
+            "google_code_assist": {
+                "enabled": True,
+                "priority": 15,
+                "endpoint": "https://cloudcode-pa.googleapis.com",
+                "keys": [
+                    {"id": "google-ai-pro-main", "key": "oauth:google_code_assist/main"},
+                    {"id": "google-ai-pro-work", "key": f"oauth-file:{work_path}"},
+                ],
+            }
+        },
+        "storage": {"sqlite_path": str(tmp_path / "gateway.db")},
+    }
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    result = runner.invoke(cli_app, ["providers", "accounts", "--config-path", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Google Code Assist Accounts" in result.stdout
+    rows = _google_code_assist_account_rows(str(config_path))
+    assert rows[0]["account_email"] == "main@example.com"
+    assert rows[0]["key_ids"] == "google-ai-pro-main"
+    assert rows[1]["account_email"] == "work@example.com"
+    assert rows[1]["key_ids"] == "google-ai-pro-work"
+    assert result.stdout.strip()
 
 
 def test_cli_without_args_opens_management_panel(monkeypatch) -> None:

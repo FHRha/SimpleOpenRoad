@@ -162,7 +162,7 @@ PROVIDER_METADATA: dict[str, ProviderMetadata] = {
     ),
     "google_code_assist": ProviderMetadata(
         id="google_code_assist",
-        display_name="Gemini CLI OAuth",
+        display_name="Google OAuth for Gemini Code Assist",
         aliases=("google ai pro", "code assist", "gemini cli", "google oauth"),
         groups=("experimental", "subscription"),
         api_key_url="https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html",

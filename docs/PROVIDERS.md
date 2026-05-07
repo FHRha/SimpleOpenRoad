@@ -20,7 +20,7 @@ sor routes preview --model auto/general
 | [Amazon Bedrock](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html) | yes | yes | model-dependent | yes | Amazon Bedrock API keys. |
 | [Google Vertex AI](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/openai) | yes | yes | model-dependent | yes | Google Cloud auth via access token, service account JSON, or ADC. |
 | [Gemini](https://aistudio.google.com/apikey) | yes | yes | model-dependent | yes | Google AI Studio API keys. |
-| [Gemini CLI OAuth](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html) | yes | yes | experimental | yes | Gemini CLI-style OAuth for Google AI Pro / Ultra accounts. |
+| [Google OAuth for Gemini Code Assist](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html) | yes | yes | experimental | yes | Direct Google OAuth for Gemini Code Assist / AI Pro accounts. Supports browser callback or manual code entry. |
 | [GitHub Models](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) | yes | yes | model-dependent | yes | GitHub personal access token. |
 | [Mistral AI](https://console.mistral.ai/api-keys) | yes | yes | model-dependent | yes | Mistral console API keys. |
 | [Groq](https://console.groq.com/keys) | yes | yes | model-dependent | yes | GroqCloud API keys. |
@@ -259,6 +259,32 @@ providers:
 ```bash
 sor keys add --provider gemini --key-id gemini-main --secret <TOKEN>
 ```
+
+## Google OAuth for Gemini Code Assist
+
+SimpleOpenRoad can connect Gemini Code Assist accounts with its own OAuth pipeline instead of depending on the Gemini CLI runtime. The flow uses PKCE, opens the system browser for consent, and stores credentials per local profile under `data/credentials/google_code_assist/`.
+
+Environment variables required by the OAuth exchange:
+
+- `GEMINI_OAUTH_CLIENT_ID`
+- `GEMINI_OAUTH_CLIENT_SECRET`
+
+Optional redirect override for local callback mode:
+
+- `GEMINI_OAUTH_REDIRECT_URI`
+
+Recommended usage:
+
+```bash
+sor providers connect google
+sor providers accounts
+```
+
+If `GEMINI_OAUTH_REDIRECT_URI` points to `http://127.0.0.1` or `http://localhost`, SimpleOpenRoad starts a loopback callback listener and waits for the browser redirect. Otherwise it falls back to manual authorization-code entry.
+
+Multiple Google accounts are supported by using different local profiles. Each profile gets its own credential file and provider key, so you can keep `main`, `work`, and `personal` separate.
+
+Legacy Gemini CLI credential files are still supported for imports when you already have `oauth_creds.json` or `gemini-credentials.json` on disk.
 
 ## Gemini CLI OAuth
 

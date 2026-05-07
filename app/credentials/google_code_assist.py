@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-import json
+import base64
 import getpass
+import hashlib
+import json
+import os
 import platform
+import secrets
 import subprocess
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
@@ -16,6 +23,14 @@ import httpx
 USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com"
 CODE_ASSIST_VERSION = "v1internal"
+GEMINI_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GEMINI_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GEMINI_OAUTH_DEFAULT_REDIRECT_URI = "https://codeassist.google.com/authcode"
+GEMINI_OAUTH_SCOPES = [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+]
 GEMINI_CLI_KEYCHAIN_FILE = "gemini-credentials.json"
 GEMINI_CLI_KEYCHAIN_SERVICE = "gemini-cli-oauth"
 GEMINI_CLI_MAIN_ACCOUNT = "main-account"
@@ -52,10 +67,10 @@ def parse_credential_ref(value: str) -> tuple[str, Path | None]:
 def refresh_access_token(credentials: dict[str, Any]) -> dict[str, Any]:
     refresh_token = str(credentials.get("refresh_token") or "").strip()
     if not refresh_token:
-        raise ValueError("Gemini CLI OAuth credentials do not contain refresh_token")
+        raise ValueError("Google OAuth credentials do not contain refresh_token")
     raise ValueError(
-        "Gemini CLI OAuth token is expired and cannot be refreshed directly by SimpleOpenRoad. "
-        "Run the official Gemini CLI login again, then run: sor providers connect google"
+        "Google OAuth token is expired and cannot be refreshed directly by SimpleOpenRoad. "
+        "Run `sor providers connect google` again to sign in again."
     )
 
 
@@ -93,6 +108,153 @@ def save_credentials(path: Path, credentials: dict[str, Any]) -> None:
         pass
 
 
+def gemini_oauth_redirect_uri() -> str:
+    override = (os.getenv("GEMINI_OAUTH_REDIRECT_URI") or "").strip()
+    return override or GEMINI_OAUTH_DEFAULT_REDIRECT_URI
+
+
+def is_loopback_redirect_uri(redirect_uri: str) -> bool:
+    parsed = urlparse(redirect_uri)
+    return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
+
+
+def build_gemini_oauth_authorization_request(redirect_uri: str | None = None) -> tuple[str, str, str]:
+    client_id, _client_secret = _gemini_oauth_client_credentials()
+    resolved_redirect_uri = redirect_uri or gemini_oauth_redirect_uri()
+    code_verifier = _generate_code_verifier()
+    code_challenge = _code_challenge(code_verifier)
+    state = secrets.token_hex(16)
+    query = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": resolved_redirect_uri,
+            "response_type": "code",
+            "access_type": "offline",
+            "scope": " ".join(GEMINI_OAUTH_SCOPES),
+            "code_challenge_method": "S256",
+            "code_challenge": code_challenge,
+            "state": state,
+            "prompt": "consent",
+        }
+    )
+    return f"{GEMINI_OAUTH_AUTH_URL}?{query}", code_verifier, state
+
+
+def exchange_gemini_oauth_authorization_code(
+    code: str,
+    code_verifier: str,
+    redirect_uri: str | None = None,
+) -> dict[str, Any]:
+    client_id, client_secret = _gemini_oauth_client_credentials()
+    resolved_redirect_uri = redirect_uri or gemini_oauth_redirect_uri()
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": resolved_redirect_uri,
+        "grant_type": "authorization_code",
+        "code_verifier": code_verifier,
+    }
+    with httpx.Client(timeout=30) as client:
+        response = client.post(GEMINI_OAUTH_TOKEN_URL, data=data)
+    if response.status_code >= 400:
+        raise ValueError(
+            f"Failed to exchange authorization code for tokens: {response.status_code}: {response.text[:1200]}"
+        )
+
+    payload = response.json()
+    if not isinstance(payload, dict) or not payload.get("access_token"):
+        raise ValueError("Failed to exchange authorization code for tokens: missing access_token")
+
+    credentials: dict[str, Any] = {
+        "access_token": payload.get("access_token"),
+        "refresh_token": payload.get("refresh_token"),
+        "token_type": payload.get("token_type") or "Bearer",
+        "scope": payload.get("scope"),
+    }
+    expires_in = payload.get("expires_in")
+    if isinstance(expires_in, int):
+        credentials["expiry_date"] = int(time.time() * 1000) + expires_in * 1000
+    return _without_none(credentials)
+
+
+class OAuthCallbackListener:
+    def __init__(self, server: ThreadingHTTPServer, redirect_uri: str, result: dict[str, str], event: threading.Event):
+        self._server = server
+        self.redirect_uri = redirect_uri
+        self._result = result
+        self._event = event
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def wait_for_code(self, expected_state: str, timeout_seconds: int = 300) -> tuple[str | None, str | None]:
+        if not self._event.wait(timeout_seconds):
+            return None, "timeout"
+        code = str(self._result.get("code") or "").strip()
+        state = str(self._result.get("state") or "").strip()
+        error = str(self._result.get("error") or "").strip()
+        if error:
+            return None, error
+        if not code:
+            return None, "missing_code"
+        if state != expected_state:
+            return None, "state_mismatch"
+        return code, None
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def start_oauth_callback_listener(redirect_uri: str) -> OAuthCallbackListener:
+    parsed = urlparse(redirect_uri)
+    if not is_loopback_redirect_uri(redirect_uri):
+        raise ValueError("Local OAuth callback listener requires a loopback redirect URI")
+
+    path = parsed.path or "/authcode"
+    bind_host = parsed.hostname or "127.0.0.1"
+    bind_port = parsed.port or 0
+    result: dict[str, str] = {}
+    event = threading.Event()
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+            request = urlparse(self.path)
+            if request.path.rstrip("/") != path.rstrip("/"):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            params = parse_qs(request.query)
+            code = (params.get("code") or [""])[0].strip()
+            state = (params.get("state") or [""])[0].strip()
+            error = (params.get("error") or [""])[0].strip()
+            if error:
+                result["error"] = error
+                body = f"OAuth error: {error}\n"
+                self.send_response(400)
+            elif code:
+                result["code"] = code
+                result["state"] = state
+                body = "Authorization complete. You can return to SimpleOpenRoad.\n"
+                self.send_response(200)
+            else:
+                result["error"] = "missing_code"
+                body = "Authorization response did not include a code.\n"
+                self.send_response(400)
+            event.set()
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A003 - match BaseHTTPRequestHandler signature
+            return
+
+    server = ThreadingHTTPServer((bind_host, bind_port), CallbackHandler)
+    actual_port = int(server.server_address[1])
+    actual_redirect_uri = f"{parsed.scheme}://{bind_host}:{actual_port}{path}"
+    return OAuthCallbackListener(server=server, redirect_uri=actual_redirect_uri, result=result, event=event)
 def code_assist_post(access_token: str, method: str, payload: dict[str, Any]) -> dict[str, Any]:
     with httpx.Client(timeout=60) as client:
         response = client.post(
@@ -161,7 +323,7 @@ def setup_user(credentials: dict[str, Any], project_id: str | None = None) -> di
     if not project:
         ineligible = load_result.get("ineligibleTiers") or []
         reason = ", ".join(str(item.get("reasonMessage") or item.get("reasonCode")) for item in ineligible)
-        raise ValueError(reason or "Gemini CLI OAuth did not return a usable project")
+        raise ValueError(reason or "Google OAuth did not return a usable project")
 
     credentials["project_id"] = project
     credentials["user_tier"] = tier.get("id")
@@ -178,9 +340,8 @@ def import_gemini_cli_credentials(
     source = Path(source_path).expanduser() if source_path else _default_gemini_cli_credentials_source()
     if not source.exists():
         raise ValueError(
-            f"Gemini CLI credentials were not found at {source}. "
-            "Run the official Gemini CLI and sign in with Google first. "
-            "On a headless VPS, prefer: GEMINI_FORCE_FILE_STORAGE=true gemini"
+            f"Google OAuth credentials were not found at {source}. "
+            "Run `sor providers connect google` to sign in first."
         )
     credentials = _load_gemini_cli_credentials_source(source)
     credentials["credential_source"] = "gemini_cli"
@@ -263,10 +424,10 @@ process.stdout.write(out);
             timeout=15,
         )
     except FileNotFoundError as exc:
-        raise ValueError("Node.js is required to import Gemini CLI encrypted file credentials") from exc
+        raise ValueError("Node.js is required to import legacy Gemini CLI encrypted file credentials") from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
-        raise ValueError(f"Could not decrypt Gemini CLI credentials file: {detail}") from exc
+        raise ValueError(f"Could not decrypt legacy Gemini CLI credentials file: {detail}") from exc
     return result.stdout
 
 
@@ -284,6 +445,34 @@ def _normalize_gemini_cli_token_shape(credentials: dict[str, Any]) -> dict[str, 
     return dict(credentials)
 
 
+def _generate_code_verifier() -> str:
+    return _base64url(secrets.token_bytes(64))
+
+
+def _code_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    return _base64url(digest)
+
+
+def _base64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _gemini_oauth_client_credentials() -> tuple[str, str]:
+    client_id = (os.getenv("GEMINI_OAUTH_CLIENT_ID") or "").strip()
+    client_secret = (os.getenv("GEMINI_OAUTH_CLIENT_SECRET") or "").strip()
+    missing: list[str] = []
+    if not client_id:
+        missing.append("GEMINI_OAUTH_CLIENT_ID")
+    if not client_secret:
+        missing.append("GEMINI_OAUTH_CLIENT_SECRET")
+    if missing:
+        names = ", ".join(missing)
+        raise ValueError(
+            "Gemini OAuth client credentials are not configured. Set "
+            f"{names} in the environment before running providers connect."
+        )
+    return client_id, client_secret
 def _credential_expires_at(credentials: dict[str, Any]) -> int:
     expires_at = int(credentials.get("expires_at") or 0)
     if expires_at:

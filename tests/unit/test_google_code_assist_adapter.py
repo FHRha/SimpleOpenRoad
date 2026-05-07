@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 
+import httpx
 import pytest
 
 from app.config.models import ProviderConfig
@@ -79,6 +80,28 @@ def test_google_oauth_ref_parsing() -> None:
 def test_gemini_cli_credentials_path_uses_home_gemini_dir(tmp_path) -> None:
     assert gemini_cli_credentials_path(tmp_path) == tmp_path / ".gemini" / "oauth_creds.json"
     assert gemini_cli_keychain_path(tmp_path) == tmp_path / ".gemini" / "gemini-credentials.json"
+
+
+def test_gemini_oauth_redirect_uri_uses_environment(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_OAUTH_REDIRECT_URI", "http://127.0.0.1:8085/authcode")
+
+    assert google_code_assist.gemini_oauth_redirect_uri() == "http://127.0.0.1:8085/authcode"
+
+
+def test_local_oauth_callback_listener_receives_code() -> None:
+    listener = google_code_assist.start_oauth_callback_listener("http://127.0.0.1:0/authcode")
+    try:
+        assert listener.redirect_uri.startswith("http://127.0.0.1:")
+        response = httpx.get(
+            f"{listener.redirect_uri}?code=auth-code-123&state=state-123",
+            timeout=5,
+        )
+        assert response.status_code == 200
+        code, error = listener.wait_for_code(expected_state="state-123", timeout_seconds=2)
+        assert error is None
+        assert code == "auth-code-123"
+    finally:
+        listener.close()
 
 
 def test_imported_gemini_cli_credentials_normalizes_expiry_date() -> None:
